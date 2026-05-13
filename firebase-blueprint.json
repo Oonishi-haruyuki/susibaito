@@ -1,0 +1,67 @@
+{
+  "entities": {
+    "Order": {
+      "title": "Order",
+      "description": "A customer order in the sushi restaurant",
+      "type": "object",
+      "properties": {
+        "tableNumber": { "type": "number", "description": "The table number for the order" },
+        "items": { "type": "array", "description": "List of ordered items" },
+        "status": { "type": "string", "enum": ["received", "preparing", "served", "paid"], "description": "Current status of the order" },
+        "totalAmount": { "type": "number", "description": "Total price of the order" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Timestamp when the order was created" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Timestamp when the order was last updated" },
+        "customerId": { "type": "string", "description": "Reference to the customer who placed the order" },
+        "type": { "type": "string", "enum": ["eat-in", "takeout"], "description": "Whether the order is for eat-in or takeout" }
+      },
+      "required": ["tableNumber", "items", "status", "totalAmount", "createdAt", "updatedAt", "type"]
+    },
+    "InventoryItem": {
+      "title": "Inventory Item",
+      "description": "An ingredient or supply in stock",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Name of the item" },
+        "unit": { "type": "string", "description": "Unit of measurement (e.g., kg, g, pcs)" },
+        "quantity": { "type": "number", "description": "Current quantity in stock" },
+        "minThreshold": { "type": "number", "description": "Minimum threshold before alert" },
+        "category": { "type": "string", "enum": ["fish", "vegetable", "rice", "drink", "other"], "description": "Category of the item" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Last update timestamp" }
+      },
+      "required": ["name", "unit", "quantity", "minThreshold", "category", "updatedAt"]
+    },
+    "Customer": {
+      "title": "Customer",
+      "description": "A customer profile",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Customer name" },
+        "phone": { "type": "string", "description": "Phone number" },
+        "allergies": { "type": "array", "description": "Known allergies" },
+        "preferences": { "type": "string", "description": "General preferences or notes" },
+        "totalVisits": { "type": "number", "description": "Total number of visits" },
+        "lastVisit": { "type": "string", "format": "date-time", "description": "Timestamp of the last visit" }
+      },
+      "required": ["name", "totalVisits"]
+    },
+    "MenuItem": {
+      "title": "Menu Item",
+      "description": "An item on the sushi restaurant menu",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Name of the dish" },
+        "price": { "type": "number", "description": "Price in yen" },
+        "category": { "type": "string", "enum": ["nigiri", "roll", "sashimi", "side", "drink"], "description": "Category of the dish" },
+        "description": { "type": "string", "description": "Short description" },
+        "imageUrl": { "type": "string", "description": "URL to the image of the dish" }
+      },
+      "required": ["name", "price", "category"]
+    }
+  },
+  "firestore": {
+    "orders": { "schema": "Order", "description": "Collection of customer orders" },
+    "inventory": { "schema": "InventoryItem", "description": "Collection of inventory items" },
+    "customers": { "schema": "Customer", "description": "Collection of customer profiles" },
+    "menu": { "schema": "MenuItem", "description": "Collection of menu items for the shop" }
+  }
+}

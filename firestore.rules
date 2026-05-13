@@ -1,0 +1,126 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      // In this app, we consider the primary owner and verified staff as admins.
+      // We explicitly allow the provided user email for management.
+      return isSignedIn() && (
+        request.auth.token.email == '2410010@i-seifu.jp' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- Validation Helpers ---
+
+    function isValidOrder(data) {
+      return data.keys().hasAll(['tableNumber', 'items', 'status', 'totalAmount', 'createdAt', 'updatedAt', 'type'])
+        && data.tableNumber is number
+        && data.items is list
+        && data.status in ['received', 'preparing', 'served', 'paid']
+        && data.totalAmount is number
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp
+        && data.type in ['eat-in', 'takeout']
+        && data.items.size() <= 50;
+    }
+
+    function isValidInventoryItem(data) {
+      return data.keys().hasAll(['name', 'unit', 'quantity', 'minThreshold', 'category', 'updatedAt'])
+        && data.name is string && data.name.size() <= 100
+        && data.unit is string && data.unit.size() <= 20
+        && data.quantity is number
+        && data.minThreshold is number
+        && data.category in ['fish', 'vegetable', 'rice', 'drink', 'other']
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCustomer(data) {
+      return data.keys().hasAll(['name', 'totalVisits'])
+        && data.name is string && data.name.size() <= 100
+        && data.totalVisits is number
+        && (!('phone' in data) || (data.phone is string && data.phone.size() <= 20))
+        && (!('allergies' in data) || (data.allergies is list && data.allergies.size() <= 20))
+        && (!('lastVisit' in data) || (data.lastVisit is timestamp || data.lastVisit == null))
+        && (!('preferences' in data) || (data.preferences is string && data.preferences.size() <= 1000));
+    }
+
+    function isValidMenuItem(data) {
+      return data.keys().hasAll(['name', 'price', 'category'])
+        && data.name is string && data.name.size() <= 100
+        && data.price is number
+        && data.category in ['nigiri', 'roll', 'sashimi', 'side', 'drink']
+        && (!('description' in data) || (data.description is string && data.description.size() <= 500))
+        && (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 1000));
+    }
+
+    // --- Collections ---
+
+    match /orders/{orderId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidOrder(incoming()) && isValidId(orderId);
+      allow update: if isSignedIn() && (
+        (isValidOrder(incoming()) && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['items', 'totalAmount', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['tableNumber', 'items', 'status', 'totalAmount', 'updatedAt', 'customerId', 'type'])
+        ))
+      );
+      allow delete: if isAdmin();
+    }
+
+    match /inventory/{itemId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidInventoryItem(incoming()) && isValidId(itemId);
+      allow update: if isSignedIn() && isValidInventoryItem(incoming()) && (
+        incoming().diff(existing()).affectedKeys().hasAny(['quantity', 'name', 'unit', 'minThreshold', 'category', 'updatedAt'])
+      );
+      allow delete: if isAdmin();
+    }
+
+    match /customers/{customerId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidCustomer(incoming()) && isValidId(customerId);
+      allow update: if isSignedIn() && isValidCustomer(incoming()) && (
+        incoming().diff(existing()).affectedKeys().hasAny(['name', 'phone', 'allergies', 'preferences', 'totalVisits', 'lastVisit'])
+      );
+      allow delete: if isAdmin();
+    }
+
+    match /menu/{menuItemId} {
+      allow read: if true;
+      allow create: if isAdmin() && isValidMenuItem(incoming()) && isValidId(menuItemId);
+      allow update: if isAdmin() && isValidMenuItem(incoming()) && (
+        incoming().diff(existing()).affectedKeys().hasAny(['name', 'price', 'category', 'description', 'imageUrl'])
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Static collection for admin management if needed
+    match /admins/{adminId} {
+      allow read: if isSignedIn();
+      allow write: if false; // Only manageable via console
+    }
+  }
+}

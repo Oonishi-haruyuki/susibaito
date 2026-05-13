@@ -53,6 +53,13 @@ service cloud.firestore {
         && data.quantity is number
         && data.minThreshold is number
         && data.category in ['fish', 'vegetable', 'rice', 'drink', 'other']
+        && data.updatedAt is timestamp
+        && (!('purchasePrice' in data) || data.purchasePrice is number);
+    }
+
+    function isValidFinance(data) {
+      return data.keys().hasAll(['balance', 'updatedAt'])
+        && data.balance is number
         && data.updatedAt is timestamp;
     }
 
@@ -94,7 +101,7 @@ service cloud.firestore {
       allow read: if isSignedIn();
       allow create: if isSignedIn() && isValidInventoryItem(incoming()) && isValidId(itemId);
       allow update: if isSignedIn() && isValidInventoryItem(incoming()) && (
-        incoming().diff(existing()).affectedKeys().hasAny(['quantity', 'name', 'unit', 'minThreshold', 'category', 'updatedAt'])
+        incoming().diff(existing()).affectedKeys().hasAny(['quantity', 'name', 'unit', 'minThreshold', 'category', 'updatedAt', 'purchasePrice'])
       );
       allow delete: if isAdmin();
     }
@@ -113,6 +120,15 @@ service cloud.firestore {
       allow create: if isAdmin() && isValidMenuItem(incoming()) && isValidId(menuItemId);
       allow update: if isAdmin() && isValidMenuItem(incoming()) && (
         incoming().diff(existing()).affectedKeys().hasAny(['name', 'price', 'category', 'description', 'imageUrl'])
+      );
+      allow delete: if isAdmin();
+    }
+
+    match /finances/{financeId} {
+      allow read: if isSignedIn();
+      allow create: if isAdmin() && isValidFinance(incoming()) && isValidId(financeId);
+      allow update: if isSignedIn() && isValidFinance(incoming()) && (
+        incoming().diff(existing()).affectedKeys().hasAny(['balance', 'updatedAt'])
       );
       allow delete: if isAdmin();
     }

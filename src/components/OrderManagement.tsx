@@ -120,10 +120,31 @@ export function OrderManagement() {
   const handleUpdateStatus = async (orderId: string, newStatus: OrderStatus) => {
     try {
       const orderRef = doc(db, 'orders', orderId);
-      await updateDoc(orderRef, {
-        status: newStatus,
-        updatedAt: Timestamp.now()
-      });
+
+      if (newStatus === 'paid') {
+        const orderSnap = await getDoc(orderRef);
+        if (!orderSnap.exists()) return;
+        const totalAmount = orderSnap.data().totalAmount || 0;
+
+        await runTransaction(db, async (transaction) => {
+          const financeRef = doc(db, 'finances', 'main');
+          
+          transaction.update(orderRef, {
+            status: newStatus,
+            updatedAt: Timestamp.now()
+          });
+
+          transaction.update(financeRef, {
+            balance: increment(totalAmount),
+            updatedAt: Timestamp.now()
+          });
+        });
+      } else {
+        await updateDoc(orderRef, {
+          status: newStatus,
+          updatedAt: Timestamp.now()
+        });
+      }
       toast.success('ステータスを更新しました');
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `orders/${orderId}`);
@@ -168,9 +189,9 @@ export function OrderManagement() {
       }
 
       const totalAmount = items.reduce((acc, i) => acc + (i.price * i.quantity), 0);
-      
+      const tableNum = parseInt(newOrder.tableNumber);
       const orderData: Omit<Order, 'id'> = {
-        tableNumber: parseInt(newOrder.tableNumber),
+        tableNumber: isNaN(tableNum) ? 0 : tableNum,
         type: newOrder.type,
         status: 'received',
         items,
@@ -218,11 +239,11 @@ export function OrderManagement() {
   };
 
   const filteredOrders = orders.filter(order => {
-    const tableMatch = order.tableNumber.toString().includes(searchTerm);
-    const customer = customers.find(c => c.id === order.customerId);
-    const customerNameMatch = customer ? customer.name.toLowerCase().includes(searchTerm.toLowerCase()) : false;
+    const tableMatch = order.tableNumber > 0 && order.tableNumber.toString().includes(searchTerm);
+    const customerIdMatch = order.customerId && customers.find(c => c.id === order.customerId)?.name.toLowerCase().includes(searchTerm.toLowerCase());
+    const customerNameMatch = order.customerName?.toLowerCase().includes(searchTerm.toLowerCase());
     
-    return tableMatch || customerNameMatch;
+    return tableMatch || customerIdMatch || customerNameMatch;
   });
 
   const activeOrders = orders.filter(o => o.status !== 'paid');
@@ -327,7 +348,10 @@ export function OrderManagement() {
                       className="w-20" 
                       min="1"
                       value={isNaN(item.quantity) ? "" : item.quantity}
-                      onChange={(e) => updateOrderItemRaw(index, item.menuItemId, parseInt(e.target.value))}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value);
+                        updateOrderItemRaw(index, item.menuItemId, isNaN(val) ? 1 : val);
+                      }}
                     />
                     <Button 
                       variant="ghost" 
@@ -414,8 +438,20 @@ export function OrderManagement() {
                       </TableCell>
                       <TableCell>
                         <div className="flex items-center gap-2">
-                          {order.type === 'eat-in' ? <Utensils size={14} className="text-zinc-400" /> : <ShoppingBag size={14} className="text-zinc-400" />}
-                          <span className="font-medium">{order.type === 'eat-in' ? `${order.tableNumber}番卓` : `持ち帰り #${order.tableNumber}`}</span>
+                          {order.type === 'eat-in' ? (
+                            <>
+                              <Utensils size={14} className="text-zinc-400" />
+                              <span className="font-medium">{order.tableNumber}番卓</span>
+                            </>
+                          ) : (
+                            <>
+                              <ShoppingBag size={14} className="text-[#E31E24]" />
+                              <div className="flex flex-col">
+                                <span className="font-medium text-[#E31E24]">お持ち帰り</span>
+                                <span className="text-[10px] text-zinc-500">{order.customerName || '店頭受付'}</span>
+                              </div>
+                            </>
+                          )}
                         </div>
                       </TableCell>
                       <TableCell className="max-w-[300px]">

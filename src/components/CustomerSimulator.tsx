@@ -200,7 +200,7 @@ export function CustomerSimulator() {
       </div>
 
       <div className="flex-1 bg-zinc-100 rounded-3xl overflow-hidden relative shadow-inner border border-zinc-200">
-        <Canvas shadows>
+        <Canvas shadows={{ type: THREE.PCFShadowMap }}>
           <PerspectiveCamera makeDefault position={[0, 5, 8]} fov={50} />
           <OrbitControls 
             enablePan={false} 

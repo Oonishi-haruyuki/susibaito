@@ -11,7 +11,7 @@ import {
   deleteDoc
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '@/src/lib/firebase';
-import { InventoryItem, InventoryCategory } from '@/src/types';
+import { InventoryItem, InventoryCategory, MenuItem } from '@/src/types';
 import { cn } from '@/lib/utils';
 import { 
   Plus, 
@@ -24,7 +24,10 @@ import {
   Package,
   ChefHat,
   Truck,
-  ArrowRight
+  ArrowRight,
+  ArrowUp,
+  ArrowDown,
+  DollarSign
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -35,7 +38,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { 
   runTransaction,
-  increment
+  increment,
+  getDoc,
+  setDoc
 } from 'firebase/firestore';
 import { 
   Dialog, 
@@ -64,13 +69,20 @@ const CATEGORY_MAP: Record<InventoryCategory, string> = {
 
 export function InventoryManagement() {
   const [items, setItems] = useState<InventoryItem[]>([]);
+  const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
+  const [balance, setBalance] = useState<number>(0);
   const [activeTab, setActiveTab] = useState('list');
   const [isAddingItem, setIsAddingItem] = useState(false);
   const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
   const [search, setSearch] = useState('');
   
   // Cooking state
+  const [recipeType, setRecipeType] = useState<'sushi-rice' | 'menu-item'>('sushi-rice');
+  const [selectedMenuItemId, setSelectedMenuItemId] = useState('');
   const [cookAmount, setCookAmount] = useState(1);
+  
+  // Market Prices
+  const [marketFactor, setMarketFactor] = useState(1);
   
   // Procurement state
   const [procureItem, setProcureItem] = useState({
@@ -83,10 +95,19 @@ export function InventoryManagement() {
     unit: 'kg',
     quantity: 0,
     minThreshold: 1,
-    category: 'fish'
+    category: 'fish',
+    purchasePrice: 0
   });
 
   useEffect(() => {
+    // Calculate daily market factor (based on date)
+    const today = new Date();
+    const dateStr = today.getFullYear().toString() + today.getMonth().toString() + today.getDate().toString();
+    const seed = parseInt(dateStr);
+    const random = (Math.sin(seed) + 1) / 2; // Value between 0 and 1
+    const factor = 0.8 + (random * 0.4); // 0.8 to 1.2
+    setMarketFactor(factor);
+
     const q = query(collection(db, 'inventory'), orderBy('category', 'asc'));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const inventoryData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as InventoryItem));
@@ -94,7 +115,26 @@ export function InventoryManagement() {
     }, (error) => {
       handleFirestoreError(error, OperationType.LIST, 'inventory');
     });
-    return () => unsubscribe();
+
+    const menuQ = query(collection(db, 'menu'));
+    const menuUnsubscribe = onSnapshot(menuQ, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as MenuItem));
+      setMenuItems(data);
+    });
+
+    const financeUnsubscribe = onSnapshot(doc(db, 'finances', 'main'), (snap) => {
+      if (snap.exists()) {
+        setBalance(snap.data().balance || 0);
+      } else {
+        setBalance(0);
+      }
+    });
+
+    return () => {
+      unsubscribe();
+      menuUnsubscribe();
+      financeUnsubscribe();
+    };
   }, []);
 
   const handleSaveItem = async () => {
@@ -124,7 +164,7 @@ export function InventoryManagement() {
 
       setIsAddingItem(false);
       setEditingItem(null);
-      setNewItem({ name: '', unit: 'kg', quantity: 0, minThreshold: 1, category: 'fish' });
+      setNewItem({ name: '', unit: 'kg', quantity: 0, minThreshold: 1, category: 'fish', purchasePrice: 0 });
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'inventory');
     }
@@ -146,12 +186,33 @@ export function InventoryManagement() {
       return;
     }
 
+    const item = items.find(i => i.id === procureItem.id);
+    const basePrice = item?.purchasePrice || 1000;
+    const currentPrice = Math.round(basePrice * marketFactor);
+    const cost = currentPrice * procureItem.quantity;
+
+    if (balance < cost) {
+      toast.error(`予算が足りません (必要: ¥${cost.toLocaleString()} / 残高: ¥${balance.toLocaleString()})`);
+      return;
+    }
+
     try {
-      await updateDoc(doc(db, 'inventory', procureItem.id), {
-        quantity: increment(procureItem.quantity),
-        updatedAt: Timestamp.now()
+      await runTransaction(db, async (transaction) => {
+        const itemRef = doc(db, 'inventory', procureItem.id);
+        const financeRef = doc(db, 'finances', 'main');
+
+        transaction.update(itemRef, {
+          quantity: increment(procureItem.quantity),
+          updatedAt: Timestamp.now()
+        });
+
+        transaction.update(financeRef, {
+          balance: increment(-cost),
+          updatedAt: Timestamp.now()
+        });
       });
-      toast.success('食材を調達しました');
+
+      toast.success(`${item?.name} を ${procureItem.quantity}${item?.unit} 仕入れました (単価: ¥${currentPrice.toLocaleString()}, 合計支出: ¥${cost.toLocaleString()})`);
       setProcureItem({ id: '', quantity: 0 });
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'inventory/procure');
@@ -203,6 +264,7 @@ export function InventoryManagement() {
             quantity: cookAmount,
             minThreshold: 5,
             category: 'rice',
+            purchasePrice: 0,
             updatedAt: Timestamp.now()
           });
         }
@@ -213,29 +275,99 @@ export function InventoryManagement() {
     }
   };
 
-  const initializeStock = async () => {
-    const itemsToInit = [
-      { name: 'まぐろ', quantity: 100, unit: 'kg', category: 'fish' as InventoryCategory, minThreshold: 10 },
-      { name: '酢', quantity: 1, unit: 'kg', category: 'other' as InventoryCategory, minThreshold: 0.5 },
-      { name: '米', quantity: 30, unit: 'kg', category: 'rice' as InventoryCategory, minThreshold: 10 },
-    ];
+  const handleCook = async () => {
+    if (recipeType === 'sushi-rice') {
+      return handleCookSushiRice();
+    }
+
+    const menuItem = menuItems.find(m => m.id === selectedMenuItemId);
+    if (!menuItem || !menuItem.ingredients) {
+      toast.error('有効なメニュー品目を選択してください');
+      return;
+    }
+
+    // Check availability
+    const required: Record<string, number> = {};
+    for (const ing of menuItem.ingredients) {
+      const needed = ing.quantity * cookAmount;
+      const inv = items.find(i => i.id === ing.inventoryItemId);
+      if (!inv || inv.quantity < needed) {
+        toast.error(`${inv?.name || '不明な食材'}が足りません`);
+        return;
+      }
+      required[ing.inventoryItemId] = needed;
+    }
 
     try {
-      for (const item of itemsToInit) {
-        const existing = items.find(i => i.name === item.name);
-        if (existing) {
-          await updateDoc(doc(db, 'inventory', existing.id!), {
-            quantity: increment(item.quantity),
+      await runTransaction(db, async (transaction) => {
+        // Deduct ingredients
+        for (const [id, qty] of Object.entries(required)) {
+          transaction.update(doc(db, 'inventory', id), {
+            quantity: increment(-qty),
+            updatedAt: Timestamp.now()
+          });
+        }
+
+        // Add to "Prepared" item
+        const preparedName = `${menuItem.name} (仕込み済)`;
+        let preparedItem = items.find(i => i.name === preparedName);
+
+        if (preparedItem) {
+          transaction.update(doc(db, 'inventory', preparedItem.id!), {
+            quantity: increment(cookAmount),
             updatedAt: Timestamp.now()
           });
         } else {
+          const newRef = doc(collection(db, 'inventory'));
+          transaction.set(newRef, {
+            name: preparedName,
+            unit: 'pcs',
+            quantity: cookAmount,
+            minThreshold: 0,
+            category: 'other',
+            updatedAt: Timestamp.now()
+          });
+        }
+      });
+      toast.success(`${menuItem.name} を ${cookAmount} 個仕込みました`);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'inventory/cook-menu');
+    }
+  };
+
+  const initializeStock = async () => {
+    const itemsToInit = [
+      { name: 'まぐろ', quantity: 0, unit: 'kg', category: 'fish' as InventoryCategory, minThreshold: 10, purchasePrice: 3000 },
+      { name: 'サーモン', quantity: 0, unit: 'kg', category: 'fish' as InventoryCategory, minThreshold: 10, purchasePrice: 2000 },
+      { name: 'いくら', quantity: 0, unit: 'kg', category: 'fish' as InventoryCategory, minThreshold: 5, purchasePrice: 5000 },
+      { name: '海老', quantity: 0, unit: 'kg', category: 'fish' as InventoryCategory, minThreshold: 5, purchasePrice: 1500 },
+      { name: '大葉', quantity: 0, unit: 'pcs', category: 'vegetable' as InventoryCategory, minThreshold: 20, purchasePrice: 10 },
+      { name: '胡瓜', quantity: 0, unit: 'pcs', category: 'vegetable' as InventoryCategory, minThreshold: 10, purchasePrice: 50 },
+      { name: '酢', quantity: 0, unit: 'kg', category: 'other' as InventoryCategory, minThreshold: 0.5, purchasePrice: 500 },
+      { name: '米', quantity: 0, unit: 'kg', category: 'rice' as InventoryCategory, minThreshold: 10, purchasePrice: 400 },
+    ];
+
+    try {
+      // Init budget
+      const financeRef = doc(db, 'finances', 'main');
+      const financeSnap = await getDoc(financeRef);
+      if (!financeSnap.exists()) {
+        await setDoc(financeRef, {
+          balance: 500000,
+          updatedAt: Timestamp.now()
+        });
+      }
+
+      for (const item of itemsToInit) {
+        const existing = items.find(i => i.name === item.name);
+        if (!existing) {
           await addDoc(collection(db, 'inventory'), {
             ...item,
             updatedAt: Timestamp.now()
           });
         }
       }
-      toast.success('初期在庫を設定しました');
+      toast.success('基本マスター品目を登録しました。数量は「食材調達」から追加してください。');
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'inventory/init');
     }
@@ -253,26 +385,36 @@ export function InventoryManagement() {
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h2 className="text-2xl font-serif">在庫・材料管理</h2>
-          <p className="text-sm text-zinc-500">店舗の食材在庫と調理・調達を管理します</p>
+          <p className="text-sm text-zinc-500">店舗の食材在庫と調理・仕入れを管理します</p>
         </div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={initializeStock} className="text-zinc-600 border-zinc-200">
-            初期在庫をセット
-          </Button>
-          <Dialog open={isAddingItem} onOpenChange={(open) => {
-            setIsAddingItem(open);
-            if (!open) {
-              setEditingItem(null);
-              setNewItem({ name: '', unit: 'kg', quantity: 0, minThreshold: 1, category: 'fish' });
-            }
-          }}>
-            <DialogTrigger
-              render={
-                <Button className="bg-[#1A1A1A] hover:bg-[#333] text-white">
-                  <Plus size={16} className="mr-2" /> 新規アイテム
-                </Button>
+        <div className="flex items-center gap-6">
+          <div className="bg-white/50 backdrop-blur-sm border border-zinc-200 px-4 py-2 rounded-xl flex items-center gap-3">
+            <div className="bg-emerald-100 p-1.5 rounded-full text-emerald-600">
+              <DollarSign size={16} />
+            </div>
+            <div>
+              <div className="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold">現在予算 (残高)</div>
+              <div className="text-lg font-bold text-zinc-900 leading-none">¥{balance.toLocaleString()}</div>
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={initializeStock} className="text-zinc-600 border-zinc-200">
+              基本品目・初期予算を準備
+            </Button>
+            <Dialog open={isAddingItem} onOpenChange={(open) => {
+              setIsAddingItem(open);
+              if (!open) {
+                setEditingItem(null);
+                setNewItem({ name: '', unit: 'kg', quantity: 0, minThreshold: 1, category: 'fish', purchasePrice: 0 });
               }
-            />
+            }}>
+              <DialogTrigger
+                render={
+                  <Button className="bg-[#1A1A1A] hover:bg-[#333] text-white">
+                    <Plus size={16} className="mr-2" /> 新規アイテム
+                  </Button>
+                }
+              />
             <DialogContent className="font-sans">
               <DialogHeader>
                 <DialogTitle className="font-serif">{editingItem ? '在庫の編集' : '新規在庫の登録'}</DialogTitle>
@@ -317,40 +459,97 @@ export function InventoryManagement() {
                         <SelectItem value="g">g</SelectItem>
                         <SelectItem value="pcs">個 (pcs)</SelectItem>
                         <SelectItem value="L">L</SelectItem>
+                        <SelectItem value="枚">枚</SelectItem>
                         <SelectItem value="ケース">ケース</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-4">
+
+                {!editingItem && (
+                  <div className="grid grid-cols-2 gap-4 p-4 bg-zinc-50 rounded-lg border border-dashed border-zinc-200">
+                    <div className="space-y-2">
+                      <Label className="text-zinc-500">初期在庫量</Label>
+                      <Input 
+                        type="number" 
+                        placeholder="0"
+                        value={isNaN(newItem.quantity) ? "" : newItem.quantity}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value);
+                          setNewItem({...newItem, quantity: isNaN(val) ? 0 : val});
+                        }}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-zinc-500">基準単価 (¥)</Label>
+                      <Input 
+                        type="number" 
+                        placeholder="市場の平均価格"
+                        value={isNaN(newItem.purchasePrice || 0) ? "" : (newItem.purchasePrice || 0)}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value);
+                          setNewItem({...newItem, purchasePrice: isNaN(val) ? 0 : val});
+                        }}
+                      />
+                    </div>
+                    <p className="col-span-2 text-[10px] text-zinc-400">※在庫の追加や仕入れは「食材調達」タブから行ってください</p>
+                  </div>
+                )}
+
+                {editingItem && (
                   <div className="space-y-2">
-                    <Label>現在庫量</Label>
+                    <Label>基準単価 (市場相場の基準となる価格)</Label>
                     <Input 
                       type="number" 
-                      value={isNaN(newItem.quantity) ? "" : newItem.quantity}
-                      onChange={(e) => setNewItem({...newItem, quantity: parseFloat(e.target.value)})}
+                      value={isNaN(newItem.purchasePrice || 0) ? "" : (newItem.purchasePrice || 0)}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        setNewItem({...newItem, purchasePrice: isNaN(val) ? 0 : val});
+                      }}
                     />
                   </div>
-                  <div className="space-y-2">
-                    <Label>アラート閾値</Label>
-                    <Input 
-                      type="number" 
-                      value={isNaN(newItem.minThreshold) ? "" : newItem.minThreshold}
-                      onChange={(e) => setNewItem({...newItem, minThreshold: parseFloat(e.target.value)})}
-                    />
-                  </div>
+                )}
+
+                <div className="space-y-2">
+                  <Label>アラート閾値 (この残量を下回ると警告)</Label>
+                  <Input 
+                    type="number" 
+                    value={isNaN(newItem.minThreshold) ? "" : newItem.minThreshold}
+                    onChange={(e) => {
+                      const val = parseFloat(e.target.value);
+                      setNewItem({...newItem, minThreshold: isNaN(val) ? 0 : val});
+                    }}
+                  />
                 </div>
               </div>
-              <DialogFooter>
-                <Button variant="outline" onClick={() => setIsAddingItem(false)}>キャンセル</Button>
-                <Button onClick={handleSaveItem} className="bg-[#E31E24]">
-                  {editingItem ? '更新' : '登録'}
-                </Button>
+              <DialogFooter className="flex flex-col sm:flex-row justify-between items-center w-full gap-2">
+                <div className="w-full sm:w-auto">
+                  {editingItem && (
+                    <Button 
+                      variant="destructive" 
+                      onClick={() => {
+                        handleDeleteItem(editingItem.id!);
+                        setIsAddingItem(false);
+                      }}
+                      className="w-full sm:w-auto bg-red-600 hover:bg-red-700 text-white"
+                    >
+                      <Trash2 size={14} className="mr-2" />
+                      このアイテムを削除
+                    </Button>
+                  )}
+                </div>
+                <div className="flex gap-2 w-full sm:w-auto justify-end">
+                  <Button variant="outline" onClick={() => setIsAddingItem(false)} className="flex-1 sm:flex-none">キャンセル</Button>
+                  <Button onClick={handleSaveItem} className="bg-[#E31E24] flex-1 sm:flex-none">
+                    {editingItem ? '更新' : '登録'}
+                  </Button>
+                </div>
               </DialogFooter>
             </DialogContent>
           </Dialog>
         </div>
       </div>
+    </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
         <TabsList className="bg-zinc-100 p-1 h-11 w-full md:w-auto grid grid-cols-3 md:flex md:gap-1">
@@ -366,16 +565,28 @@ export function InventoryManagement() {
         </TabsList>
 
         <TabsContent value="list" className="space-y-6 pt-4">
-          <div className="flex-1 max-w-sm">
-            <Label className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5 block">検索</Label>
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={16} />
-              <Input 
-                placeholder="在庫名やカテゴリで検索..." 
-                className="pl-10" 
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />
+          <div className="flex flex-col md:flex-row gap-4 items-start md:items-end justify-between">
+            <div className="flex-1 w-full max-w-sm">
+              <Label className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5 block">検索</Label>
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={16} />
+                <Input 
+                  placeholder="在庫名やカテゴリで検索..." 
+                  className="pl-10 h-10" 
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="flex items-center gap-2 bg-zinc-50 border border-zinc-100 px-3 py-2 rounded-lg">
+              <div className="text-[10px] uppercase tracking-wider text-zinc-500 font-bold">本日の相場</div>
+              <div className={cn(
+                "font-mono text-sm font-bold flex items-center gap-1",
+                marketFactor > 1 ? "text-red-500" : "text-emerald-500"
+              )}>
+                {marketFactor > 1 ? <ArrowUp size={12} /> : <ArrowDown size={12} />}
+                {(marketFactor * 100).toFixed(0)}%
+              </div>
             </div>
           </div>
 
@@ -401,12 +612,13 @@ export function InventoryManagement() {
           <Card className="border-none shadow-sm overflow-hidden">
             <Table>
               <TableHeader>
-                <TableRow className="bg-zinc-50/50 hover:bg-transparent">
-                  <TableHead className="w-[150px]">カテゴリ</TableHead>
+                <TableRow className="bg-zinc-50/50 hover:bg-transparent text-[11px] uppercase tracking-wider">
+                  <TableHead className="w-[120px]">カテゴリ</TableHead>
                   <TableHead>アイテム名</TableHead>
-                  <TableHead>在庫量</TableHead>
+                  <TableHead>現在庫</TableHead>
+                  <TableHead>本日相場 (単価)</TableHead>
                   <TableHead>状態</TableHead>
-                  <TableHead className="text-right">操作</TableHead>
+                  <TableHead className="text-right whitespace-nowrap">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -431,6 +643,19 @@ export function InventoryManagement() {
                           <span className="text-[10px] text-zinc-500 uppercase">{item.unit}</span>
                         </div>
                       </TableCell>
+                      <TableCell className="font-mono text-zinc-600">
+                        {item.purchasePrice ? (
+                          <div className="flex flex-col">
+                            <span className={cn(
+                              "font-bold",
+                              marketFactor > 1 ? "text-red-600" : marketFactor < 1 ? "text-emerald-600" : "text-zinc-900"
+                            )}>
+                              ¥{Math.round(item.purchasePrice * marketFactor).toLocaleString()}
+                            </span>
+                            <span className="text-[10px] text-zinc-400">参考: ¥{item.purchasePrice.toLocaleString()}</span>
+                          </div>
+                        ) : '-'}
+                      </TableCell>
                       <TableCell>
                         {isLow ? (
                           <div className="flex items-center gap-1.5 text-[#E31E24] text-xs font-semibold">
@@ -445,7 +670,7 @@ export function InventoryManagement() {
                         )}
                       </TableCell>
                       <TableCell className="text-right">
-                        <div className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <div className="flex justify-end gap-1">
                           <Button 
                             variant="ghost" 
                             size="icon" 
@@ -457,7 +682,8 @@ export function InventoryManagement() {
                                 unit: item.unit,
                                 quantity: item.quantity,
                                 minThreshold: item.minThreshold,
-                                category: item.category
+                                category: item.category,
+                                purchasePrice: item.purchasePrice || 0
                               });
                               setIsAddingItem(true);
                             }}
@@ -486,13 +712,16 @@ export function InventoryManagement() {
           <div className="max-w-2xl mx-auto">
             <Card className="border-none shadow-sm">
               <CardHeader>
-                <CardTitle className="font-serif">食材の調達</CardTitle>
-                <CardDescription>取引先から届いた食材を、現在の在庫に追加します</CardDescription>
+                <CardTitle className="font-serif flex items-center gap-2">
+                  <Truck size={20} />
+                  食材の購入・仕入れ
+                </CardTitle>
+                <CardDescription>必要な材料を市場や取引先から購入します</CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   <div className="space-y-2">
-                    <Label>調達アイテム</Label>
+                    <Label>購入アイテム</Label>
                     <Select 
                       value={procureItem.id} 
                       onValueChange={(val) => setProcureItem({...procureItem, id: val})}
@@ -501,24 +730,47 @@ export function InventoryManagement() {
                         <SelectValue placeholder="食材を選択" />
                       </SelectTrigger>
                       <SelectContent>
-                        {items.map(i => (
-                          <SelectItem key={i.id} value={i.id!}>{i.name} ({i.unit})</SelectItem>
-                        ))}
+                        {items.filter(i => i.purchasePrice !== undefined).map(i => {
+                          const currentPrice = Math.round((i.purchasePrice || 0) * marketFactor);
+                          return (
+                            <SelectItem key={i.id} value={i.id!}>
+                              {i.name} (相場: ¥{currentPrice.toLocaleString()}/{i.unit})
+                            </SelectItem>
+                          );
+                        })}
                       </SelectContent>
                     </Select>
                   </div>
                   <div className="space-y-2">
-                    <Label>調達数量</Label>
+                    <Label>購入数量 ({items.find(i => i.id === procureItem.id)?.unit || '-'})</Label>
                     <Input 
                       type="number" 
                       placeholder="数量を入力"
-                      value={procureItem.quantity || ''}
-                      onChange={(e) => setProcureItem({...procureItem, quantity: parseFloat(e.target.value)})}
+                      value={isNaN(procureItem.quantity) || procureItem.quantity === 0 ? '' : procureItem.quantity}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        setProcureItem({...procureItem, quantity: isNaN(val) ? 0 : val});
+                      }}
                     />
                   </div>
                 </div>
-                <Button onClick={handleProcure} className="w-full bg-[#1A1A1A] text-white">
-                  調達確定
+
+                {procureItem.id && procureItem.quantity > 0 && (
+                  <div className="p-4 bg-zinc-50 rounded-lg border border-zinc-100 flex justify-between items-center">
+                    <div>
+                      <div className="text-xs text-zinc-500 uppercase tracking-wider font-semibold">見積合計</div>
+                      <div className="text-2xl font-bold text-zinc-900">
+                        ¥{Math.round(((items.find(i => i.id === procureItem.id)?.purchasePrice || 0) * marketFactor) * procureItem.quantity).toLocaleString()}
+                      </div>
+                    </div>
+                    <div className="text-right text-sm text-zinc-500 italic">
+                      本日単価 ¥{Math.round((items.find(i => i.id === procureItem.id)?.purchasePrice || 0) * marketFactor).toLocaleString()} × {procureItem.quantity}
+                    </div>
+                  </div>
+                )}
+
+                <Button onClick={handleProcure} className="w-full bg-[#1A1A1A] text-white h-12 text-lg">
+                  購入を確定する
                 </Button>
               </CardContent>
             </Card>
@@ -526,51 +778,123 @@ export function InventoryManagement() {
         </TabsContent>
 
         <TabsContent value="cook" className="pt-4">
-          <div className="max-w-2xl mx-auto">
+          <div className="max-w-2xl mx-auto space-y-6">
             <Card className="border-none shadow-sm">
               <CardHeader>
                 <CardTitle className="font-serif flex items-center gap-2">
                   <ChefHat size={20} />
-                  酢飯 (シャリ) の仕込み
+                  仕込み・調理
                 </CardTitle>
-                <CardDescription>酢と米を 3:7 の黄金比で混ぜ合わせ、酢飯を作成します</CardDescription>
+                <CardDescription>材料を消費して、半製品や完成品を作成します</CardDescription>
               </CardHeader>
-              <CardContent className="space-y-8">
-                <div className="flex items-center justify-center gap-12 py-4">
-                  <div className="text-center space-y-2">
-                    <div className="w-20 h-20 rounded-full bg-zinc-100 flex items-center justify-center mx-auto text-xl font-bold text-zinc-400">酢</div>
-                    <div className="text-sm font-medium">3</div>
+              <CardContent className="space-y-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label>仕込み内容</Label>
+                    <Select value={recipeType} onValueChange={(val: any) => setRecipeType(val)}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="sushi-rice">酢飯 (シャリ) の仕込み</SelectItem>
+                        <SelectItem value="menu-item">寿司を握る・調理</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
-                  <Plus className="text-zinc-300" />
-                  <div className="text-center space-y-2">
-                    <div className="w-20 h-20 rounded-full bg-zinc-100 flex items-center justify-center mx-auto text-xl font-bold text-zinc-400">米</div>
-                    <div className="text-sm font-medium">7</div>
-                  </div>
-                  <ArrowRight className="text-zinc-300" />
-                  <div className="text-center space-y-2">
-                    <div className="w-24 h-24 rounded-full bg-red-50 border-2 border-dashed border-red-200 flex items-center justify-center mx-auto text-xl font-bold text-red-500">シャリ</div>
-                    <div className="text-sm font-medium text-red-500">10</div>
-                  </div>
+                  {recipeType === 'menu-item' && (
+                    <div className="space-y-2">
+                      <Label>品目選択</Label>
+                      <Select value={selectedMenuItemId} onValueChange={setSelectedMenuItemId}>
+                        <SelectTrigger>
+                          <SelectValue placeholder="メニューを選択" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {menuItems.filter(m => m.ingredients && m.ingredients.length > 0).map(m => (
+                            <SelectItem key={m.id} value={m.id!}>{m.name}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
                 </div>
 
-                <div className="space-y-4">
-                  <div className="space-y-2">
-                    <Label>仕込み量 (kg)</Label>
-                    <Input 
-                      type="number" 
-                      className="text-lg h-12 text-center font-bold"
-                      value={cookAmount}
-                      onChange={(e) => setCookAmount(parseFloat(e.target.value))}
-                    />
-                    <div className="flex justify-between text-[11px] text-zinc-500 px-1 italic">
-                      <span>必要材料:</span>
-                      <span>酢: {(cookAmount * 0.3).toFixed(2)}kg / 米: {(cookAmount * 0.7).toFixed(2)}kg</span>
+                {recipeType === 'sushi-rice' ? (
+                  <div className="bg-zinc-50 rounded-lg p-6">
+                    <div className="flex items-center justify-center gap-12 py-4">
+                      <div className="text-center space-y-2">
+                        <div className="w-16 h-16 rounded-full bg-white shadow-sm flex items-center justify-center mx-auto text-lg font-bold text-zinc-400">酢</div>
+                        <div className="text-xs font-medium">3割</div>
+                      </div>
+                      <Plus className="text-zinc-300" size={16} />
+                      <div className="text-center space-y-2">
+                        <div className="w-16 h-16 rounded-full bg-white shadow-sm flex items-center justify-center mx-auto text-lg font-bold text-zinc-400">米</div>
+                        <div className="text-xs font-medium">7割</div>
+                      </div>
+                    </div>
+                    <div className="mt-4 space-y-4">
+                      <div className="space-y-2">
+                        <Label>仕込み量 (kg)</Label>
+                        <Input 
+                          type="number" 
+                          className="h-10 text-center font-bold"
+                          value={isNaN(cookAmount) ? "" : cookAmount}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            setCookAmount(isNaN(val) ? 0 : val);
+                          }}
+                        />
+                        <div className="flex justify-between text-[10px] text-zinc-500 italic px-1">
+                          <span>必要: 酢 {(isNaN(cookAmount) ? 0 : cookAmount * 0.3).toFixed(2)}kg</span>
+                          <span>米 {(isNaN(cookAmount) ? 0 : cookAmount * 0.7).toFixed(2)}kg</span>
+                        </div>
+                      </div>
+                      <Button onClick={handleCookSushiRice} className="w-full bg-[#E31E24] text-white">
+                        酢飯を仕込む
+                      </Button>
                     </div>
                   </div>
-                  <Button onClick={handleCookSushiRice} className="w-full bg-[#E31E24] text-white">
-                    仕込み開始
-                  </Button>
-                </div>
+                ) : (
+                  <div className="bg-zinc-50 rounded-lg p-6">
+                    {selectedMenuItemId ? (
+                        <div className="space-y-4">
+                          <div className="space-y-2">
+                            <Label>作成数量 (貫/皿)</Label>
+                            <Input 
+                              type="number" 
+                              className="h-10 text-center font-bold"
+                              value={isNaN(cookAmount) ? "" : cookAmount}
+                              onChange={(e) => {
+                                const val = parseFloat(e.target.value);
+                                setCookAmount(isNaN(val) ? 0 : val);
+                              }}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label className="text-[10px] text-zinc-500 uppercase tracking-wider">必要材料 (レシピ通り)</Label>
+                            <div className="grid grid-cols-2 gap-2">
+                              {menuItems.find(m => m.id === selectedMenuItemId)?.ingredients?.map(ing => {
+                                const inv = items.find(i => i.id === ing.inventoryItemId);
+                                return (
+                                  <div key={ing.inventoryItemId} className="bg-white p-2 rounded border border-zinc-100 text-xs flex justify-between items-center">
+                                    <span className="text-zinc-600 truncate mr-2">{inv?.name || '不明'}</span>
+                                    <span className="font-mono flex-shrink-0 text-zinc-400">{(ing.quantity * cookAmount).toFixed(2)}{inv?.unit}</span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                          <Button onClick={handleCook} className="w-full bg-[#E31E24] text-white py-6">
+                            <Plus size={18} className="mr-2" />
+                            {menuItems.find(m => m.id === selectedMenuItemId)?.name} を握る
+                          </Button>
+                        </div>
+                    ) : (
+                      <div className="h-32 flex items-center justify-center text-zinc-400 italic text-sm">
+                        メニューを選択してください
+                      </div>
+                    )}
+                  </div>
+                )}
               </CardContent>
             </Card>
           </div>

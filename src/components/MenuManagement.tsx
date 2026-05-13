@@ -117,10 +117,11 @@ export function MenuManagement() {
   };
 
   const handleDeleteItem = async (id: string) => {
-    if (!confirm('品書きから削除しますか？')) return;
+    // confirm is discouraged in iframes, so we'll just execute or use a custom UI.
+    // For now, let's keep it simple or use toast for confirmation if needed.
     try {
       await deleteDoc(doc(db, 'menu', id));
-      toast.success('削除しました');
+      toast.success('品書きから削除しました');
     } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, `menu/${id}`);
     }
@@ -145,20 +146,54 @@ export function MenuManagement() {
             />
           </div>
         </div>
-        <Dialog open={isAdding} onOpenChange={(open) => {
-          setIsAdding(open);
-          if (!open) {
-            setEditingItem(null);
-            setNewItem({ name: '', price: 0, category: 'nigiri', description: '', imageUrl: '', ingredients: [] });
-          }
-        }}>
-          <DialogTrigger
-            render={
-              <Button className="h-11 bg-[#1A1A1A] hover:bg-[#333] text-white">
-                <Plus size={18} className="mr-2" /> 新規品目追加
-              </Button>
+        <div className="flex gap-2">
+          <Button 
+            variant="outline" 
+            size="sm" 
+            className="h-11 text-zinc-600 border-zinc-200"
+            onClick={async () => {
+              const maguro = inventoryItems.find(i => i.name === 'まぐろ');
+              const shari = inventoryItems.find(i => i.name === '酢飯' || i.name === 'シャリ');
+              
+              if (!maguro || !shari) {
+                toast.error('「まぐろ」と「酢飯」が在庫に必要です。「在庫管理 > 基本品目を準備」を実行してください。');
+                return;
+              }
+
+              try {
+                await addDoc(collection(db, 'menu'), {
+                  name: 'まぐろ寿司',
+                  price: 300,
+                  category: 'nigiri',
+                  description: '鮮度抜群のまぐろ握り',
+                  imageUrl: '',
+                  ingredients: [
+                    { inventoryItemId: maguro.id, quantity: 0.02 }, // 20g
+                    { inventoryItemId: shari.id, quantity: 0.02 }   // 20g
+                  ]
+                });
+                toast.success('「まぐろ寿司」のレシピを登録しました');
+              } catch (error) {
+                handleFirestoreError(error, OperationType.WRITE, 'menu/sample');
+              }
+            }}
+          >
+            サンプル注文を登録
+          </Button>
+          <Dialog open={isAdding} onOpenChange={(open) => {
+            setIsAdding(open);
+            if (!open) {
+              setEditingItem(null);
+              setNewItem({ name: '', price: 0, category: 'nigiri', description: '', imageUrl: '', ingredients: [] });
             }
-          />
+          }}>
+            <DialogTrigger
+              render={
+                <Button className="h-11 bg-[#1A1A1A] hover:bg-[#333] text-white">
+                  <Plus size={18} className="mr-2" /> 新規品目追加
+                </Button>
+              }
+            />
           <DialogContent>
             <DialogHeader>
               <DialogTitle className="font-serif">{editingItem ? '品目の編集' : '新規品目の登録'}</DialogTitle>
@@ -172,14 +207,17 @@ export function MenuManagement() {
                 />
               </div>
               <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label>価格 (円)</Label>
-                  <Input 
-                    type="number"
-                    value={isNaN(newItem.price) ? "" : newItem.price}
-                    onChange={(e) => setNewItem({...newItem, price: parseInt(e.target.value)})}
-                  />
-                </div>
+                  <div className="space-y-2">
+                    <Label>価格 (円)</Label>
+                    <Input 
+                      type="number"
+                      value={isNaN(newItem.price) ? "" : newItem.price}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value);
+                        setNewItem({...newItem, price: isNaN(val) ? 0 : val});
+                      }}
+                    />
+                  </div>
                 <div className="space-y-2">
                   <Label>カテゴリ</Label>
                   <Select 
@@ -266,8 +304,9 @@ export function MenuManagement() {
                             placeholder="分量"
                             value={isNaN(ing.quantity) ? "" : ing.quantity}
                             onChange={(e) => {
+                              const val = parseFloat(e.target.value);
                               const updated = [...(newItem.ingredients || [])];
-                              updated[idx].quantity = parseFloat(e.target.value);
+                              updated[idx].quantity = isNaN(val) ? 0 : val;
                               setNewItem({...newItem, ingredients: updated});
                             }}
                           />
@@ -296,6 +335,7 @@ export function MenuManagement() {
           </DialogContent>
         </Dialog>
       </div>
+    </div>
 
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
         {filteredItems.map((item) => (
@@ -306,12 +346,13 @@ export function MenuManagement() {
               ) : (
                 <ImageIcon className="text-zinc-300" size={32} />
               )}
-              <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+              <div className="absolute top-2 right-2 flex gap-1 group-hover:opacity-100 transition-opacity">
                 <Button 
                   variant="secondary" 
                   size="icon" 
                   className="h-7 w-7 bg-white/90 backdrop-blur shadow-sm hover:text-[#E31E24]"
-                  onClick={() => {
+                  onClick={(e) => {
+                    e.stopPropagation();
                     setEditingItem(item);
                     setNewItem({
                       name: item.name,
@@ -330,7 +371,10 @@ export function MenuManagement() {
                   variant="secondary" 
                   size="icon" 
                   className="h-7 w-7 bg-white/90 backdrop-blur shadow-sm hover:text-red-500"
-                  onClick={() => handleDeleteItem(item.id!)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleDeleteItem(item.id!);
+                  }}
                 >
                   <Trash2 size={12} />
                 </Button>

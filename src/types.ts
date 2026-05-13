@@ -18,6 +18,7 @@ export interface Order {
   createdAt: any;
   updatedAt: any;
   customerId?: string;
+  customerName?: string;
   type: OrderType;
 }
 
@@ -28,6 +29,7 @@ export interface InventoryItem {
   quantity: number;
   minThreshold: number;
   category: InventoryCategory;
+  purchasePrice?: number;
   updatedAt: any;
 }
 

@@ -26,6 +26,7 @@
         "quantity": { "type": "number", "description": "Current quantity in stock" },
         "minThreshold": { "type": "number", "description": "Minimum threshold before alert" },
         "category": { "type": "string", "enum": ["fish", "vegetable", "rice", "drink", "other"], "description": "Category of the item" },
+        "purchasePrice": { "type": "number", "description": "Purchase price per unit" },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Last update timestamp" }
       },
       "required": ["name", "unit", "quantity", "minThreshold", "category", "updatedAt"]
@@ -56,12 +57,23 @@
         "imageUrl": { "type": "string", "description": "URL to the image of the dish" }
       },
       "required": ["name", "price", "category"]
+    },
+    "Finance": {
+      "title": "Finance",
+      "description": "Financial state of the shop",
+      "type": "object",
+      "properties": {
+        "balance": { "type": "number", "description": "Current balance in yen" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Last update timestamp" }
+      },
+      "required": ["balance", "updatedAt"]
     }
   },
   "firestore": {
     "orders": { "schema": "Order", "description": "Collection of customer orders" },
     "inventory": { "schema": "InventoryItem", "description": "Collection of inventory items" },
     "customers": { "schema": "Customer", "description": "Collection of customer profiles" },
-    "menu": { "schema": "MenuItem", "description": "Collection of menu items for the shop" }
+    "menu": { "schema": "MenuItem", "description": "Collection of menu items for the shop" },
+    "finances": { "schema": "Finance", "description": "Collection for financial state" }
   }
 }

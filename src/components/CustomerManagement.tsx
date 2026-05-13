@@ -11,7 +11,7 @@ import {
   deleteDoc
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '@/src/lib/firebase';
-import { Customer } from '@/src/types';
+import { Customer, MenuItem, Order } from '@/src/types';
 import { format } from 'date-fns';
 import { ja } from 'date-fns/locale';
 import { 
@@ -21,10 +21,12 @@ import {
   Calendar, 
   MessageSquare,
   AlertCircle,
-  MoreHorizontal
+  MoreHorizontal,
+  Plus,
+  ShoppingBag
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
@@ -36,18 +38,34 @@ import {
   DialogFooter,
   DialogTrigger
 } from '@/components/ui/dialog';
+import { 
+  Select, 
+  SelectContent, 
+  SelectItem, 
+  SelectTrigger, 
+  SelectValue 
+} from '@/components/ui/select';
 import { toast } from 'sonner';
 
 export function CustomerManagement() {
   const [customers, setCustomers] = useState<Customer[]>([]);
+  const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
   const [search, setSearch] = useState('');
   const [isAdding, setIsAdding] = useState(false);
+  const [isOrdering, setIsOrdering] = useState(false);
+  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
+  
   const [newCustomer, setNewCustomer] = useState<Omit<Customer, 'id' | 'lastVisit'>>({
     name: '',
     phone: '',
     allergies: [],
     preferences: '',
     totalVisits: 0
+  });
+
+  const [takeoutOrder, setTakeoutOrder] = useState({
+    menuItemId: '',
+    quantity: 1
   });
 
   useEffect(() => {
@@ -58,7 +76,16 @@ export function CustomerManagement() {
     }, (error) => {
       handleFirestoreError(error, OperationType.LIST, 'customers');
     });
-    return () => unsubscribe();
+
+    const menuQ = query(collection(db, 'menu'));
+    const menuUnsubscribe = onSnapshot(menuQ, (snapshot) => {
+      setMenuItems(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as MenuItem)));
+    });
+
+    return () => {
+      unsubscribe();
+      menuUnsubscribe();
+    };
   }, []);
 
   const handleAddCustomer = async () => {
@@ -82,37 +109,81 @@ export function CustomerManagement() {
     }
   };
 
+  const handleCreateTakeoutOrder = async () => {
+    if (!selectedCustomer || !takeoutOrder.menuItemId) {
+      toast.error('お客様とメニューを選択してください');
+      return;
+    }
+
+    const menuItem = menuItems.find(m => m.id === takeoutOrder.menuItemId);
+    if (!menuItem) return;
+
+    try {
+      const orderData: Omit<Order, 'id'> = {
+        tableNumber: 0, // 0 indicates takeout
+        type: 'takeout',
+        status: 'received',
+        customerName: selectedCustomer.name,
+        items: [{
+          name: menuItem.name,
+          quantity: takeoutOrder.quantity,
+          price: menuItem.price
+        }],
+        totalAmount: menuItem.price * takeoutOrder.quantity,
+        createdAt: Timestamp.now(),
+        updatedAt: Timestamp.now()
+      };
+
+      await addDoc(collection(db, 'orders'), orderData);
+      
+      // Update customer visit count
+      await updateDoc(doc(db, 'customers', selectedCustomer.id!), {
+        totalVisits: (selectedCustomer.totalVisits || 0) + 1,
+        lastVisit: Timestamp.now()
+      });
+
+      setIsOrdering(false);
+      setSelectedCustomer(null);
+      setTakeoutOrder({ menuItemId: '', quantity: 1 });
+      toast.success('お持ち帰り注文を承りました');
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, 'orders');
+    }
+  };
+
   const filteredCustomers = customers.filter(c => 
     c.name.includes(search) || (c.phone && c.phone.includes(search))
   );
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-end gap-6">
-        <div className="flex-1 max-w-sm">
-          <Label className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1.5 block">顧客検索</Label>
-          <div className="relative">
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6">
+        <div>
+          <h2 className="text-2xl font-serif">お持ち帰り・顧客管理</h2>
+          <p className="text-sm text-zinc-500">主にお持ち帰りのお客様情報の管理と注文受付を行います</p>
+        </div>
+        <div className="flex items-center gap-2 w-full md:w-auto">
+          <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={16} />
             <Input 
-              placeholder="名前・電話番号で検索..." 
+              placeholder="お名前・電話番号で検索..." 
               className="pl-10 h-11" 
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
           </div>
-        </div>
-        <Dialog open={isAdding} onOpenChange={setIsAdding}>
-          <DialogTrigger
-            render={
-              <Button className="h-11 bg-[#1A1A1A] hover:bg-[#333] text-white">
-                <UserPlus size={18} className="mr-2" /> 新規顧客登録
-              </Button>
-            }
-          />
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle className="font-serif">新規顧客登録</DialogTitle>
-            </DialogHeader>
+          <Dialog open={isAdding} onOpenChange={setIsAdding}>
+            <DialogTrigger
+              render={
+                <Button className="h-11 bg-[#1A1A1A] hover:bg-[#333] text-white whitespace-nowrap">
+                  <UserPlus size={18} className="mr-2" /> 新規登録
+                </Button>
+              }
+            />
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle className="font-serif">新規顧客登録 (テイクアウト用)</DialogTitle>
+              </DialogHeader>
             <div className="grid gap-4 py-4">
               <div className="space-y-2">
                 <Label>お名前</Label>
@@ -132,7 +203,7 @@ export function CustomerManagement() {
                 <Label>アレルギー情報</Label>
                 <Input 
                   placeholder="コンマ区切りで入力 (例: エビ, カニ)"
-                  value={newCustomer.allergies?.join(', ')}
+                  value={newCustomer.allergies?.join(', ') || ''}
                   onChange={(e) => setNewCustomer({...newCustomer, allergies: e.target.value.split(',').map(s => s.trim()).filter(Boolean)})}
                 />
               </div>
@@ -151,8 +222,9 @@ export function CustomerManagement() {
           </DialogContent>
         </Dialog>
       </div>
+    </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {filteredCustomers.map((customer) => (
           <Card key={customer.id} className="border-none shadow-sm hover:shadow-md transition-shadow group relative overflow-hidden">
             <div className="absolute top-0 right-0 p-4 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -166,13 +238,13 @@ export function CustomerManagement() {
                   {customer.name[0]}
                 </div>
                 <div className="text-right">
-                  <p className="text-[10px] uppercase tracking-widest text-zinc-500">来店回数</p>
-                  <p className="font-serif text-2xl text-zinc-900">{customer.totalVisits}回</p>
+                  <p className="text-[10px] uppercase tracking-widest text-zinc-500 font-bold">ご利用回数</p>
+                  <p className="font-serif text-2xl text-zinc-900">{customer.totalVisits || 0}回</p>
                 </div>
               </div>
-              <CardTitle className="mt-4 font-serif text-lg">{customer.name}</CardTitle>
+              <CardTitle className="mt-4 font-serif text-lg text-zinc-900">{customer.name}</CardTitle>
             </CardHeader>
-            <CardContent className="px-6 pb-6 space-y-4">
+            <CardContent className="px-6 pb-6 space-y-4 flex-1">
               <div className="space-y-2">
                 {customer.phone && (
                   <div className="flex items-center gap-2 text-zinc-600 text-sm">
@@ -188,7 +260,7 @@ export function CustomerManagement() {
 
               {customer.allergies && customer.allergies.length > 0 && (
                 <div className="pt-2">
-                  <p className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1 flex items-center gap-1">
+                  <p className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1 flex items-center gap-1 font-bold">
                     <AlertCircle size={10} className="text-red-500" /> アレルギー
                   </p>
                   <div className="flex flex-wrap gap-1">
@@ -202,8 +274,8 @@ export function CustomerManagement() {
               )}
 
               {customer.preferences && (
-                <div className="pt-2 bg-zinc-50 p-3 rounded-lg">
-                  <p className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1 flex items-center gap-1">
+                <div className="pt-2 bg-zinc-50 p-3 rounded-lg border border-zinc-100">
+                  <p className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1 flex items-center gap-1 font-bold">
                     <MessageSquare size={10} /> 備考
                   </p>
                   <p className="text-xs text-zinc-700 line-clamp-2 italic leading-relaxed">
@@ -212,6 +284,75 @@ export function CustomerManagement() {
                 </div>
               )}
             </CardContent>
+            <div className="p-4 bg-zinc-100/50 mt-auto border-t border-zinc-100">
+              <Dialog open={isOrdering && selectedCustomer?.id === customer.id} onOpenChange={(open) => {
+                setIsOrdering(open);
+                if (open) setSelectedCustomer(customer);
+              }}>
+                <DialogTrigger
+                  render={
+                    <Button variant="outline" className="w-full bg-white hover:bg-zinc-100 text-zinc-900 border-zinc-200">
+                      <Plus size={16} className="mr-2" />
+                      お持ち帰り注文を入れる
+                    </Button>
+                  }
+                />
+                <DialogContent>
+                  <DialogHeader>
+                    <DialogTitle className="font-serif">テイクアウト注文受付: {customer.name}様</DialogTitle>
+                  </DialogHeader>
+                  <div className="grid gap-6 py-4">
+                    <div className="space-y-2">
+                      <Label>商品選択</Label>
+                      <Select 
+                        value={takeoutOrder.menuItemId} 
+                        onValueChange={(val) => setTakeoutOrder({...takeoutOrder, menuItemId: val})}
+                      >
+                        <SelectTrigger className="h-12 text-lg">
+                          <SelectValue placeholder="商品を選択" />
+                        </SelectTrigger>
+                        <SelectContent className="max-h-[300px]">
+                          {menuItems.map(m => (
+                            <SelectItem key={m.id} value={m.id!}>{m.name} (¥{m.price})</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>数量</Label>
+                      <Input 
+                        type="number" 
+                        min="1"
+                        className="h-12 text-2xl font-bold text-center"
+                        value={isNaN(takeoutOrder.quantity) ? "" : takeoutOrder.quantity}
+                        onChange={(e) => {
+                          const val = parseInt(e.target.value);
+                          setTakeoutOrder({...takeoutOrder, quantity: isNaN(val) ? 0 : val});
+                        }}
+                      />
+                    </div>
+                    
+                    {takeoutOrder.menuItemId && (
+                      <div className="p-4 bg-zinc-50 rounded-xl border border-zinc-100 flex justify-between items-center">
+                        <div>
+                          <div className="text-[10px] text-zinc-500 uppercase tracking-widest font-bold">お支払い合計</div>
+                          <div className="text-2xl font-bold text-zinc-900">
+                            ¥{(menuItems.find(m => m.id === takeoutOrder.menuItemId)?.price || 0) * takeoutOrder.quantity}
+                          </div>
+                        </div>
+                        <ShoppingBag className="text-zinc-300" size={32} />
+                      </div>
+                    )}
+                  </div>
+                  <DialogFooter>
+                    <Button variant="outline" onClick={() => setIsOrdering(false)}>戻る</Button>
+                    <Button onClick={handleCreateTakeoutOrder} className="bg-[#E31E24] h-12 text-lg px-8">
+                      注文を確定する
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+            </div>
           </Card>
         ))}
       </div>

@@ -7,10 +7,13 @@ import {
   addDoc, 
   updateDoc, 
   doc, 
-  Timestamp 
+  Timestamp,
+  runTransaction,
+  increment,
+  getDoc
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '@/src/lib/firebase';
-import { Order, OrderStatus, OrderType, MenuItem } from '@/src/types';
+import { Order, OrderStatus, OrderType, MenuItem, InventoryItem } from '@/src/types';
 import { format } from 'date-fns';
 import { ja } from 'date-fns/locale';
 import { cn } from '@/lib/utils';
@@ -65,6 +68,7 @@ const STATUS_MAP: Record<OrderStatus, { label: string, color: string }> = {
 export function OrderManagement() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
+  const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [isAddingOrder, setIsAddingOrder] = useState(false);
@@ -99,10 +103,17 @@ export function OrderManagement() {
       setCustomers(customerData);
     });
 
+    const inventoryQ = query(collection(db, 'inventory'));
+    const inventoryUnsubscribe = onSnapshot(inventoryQ, (snapshot) => {
+      const invData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as InventoryItem));
+      setInventoryItems(invData);
+    });
+
     return () => {
       unsubscribe();
       menuUnsubscribe();
       customerUnsubscribe();
+      inventoryUnsubscribe();
     }
   }, []);
 
@@ -126,15 +137,35 @@ export function OrderManagement() {
         return;
       }
 
+      // 1. Calculate required ingredients and check stock
+      const requiredIngredients: Record<string, number> = {};
       const items = newOrder.items.map(i => {
         const menuItem = menuItems.find(m => m.id === i.menuItemId)!;
         const quantity = isNaN(i.quantity) || i.quantity < 1 ? 1 : i.quantity;
+        
+        // Accumulate required ingredients
+        if (menuItem.ingredients) {
+          menuItem.ingredients.forEach(ing => {
+            const totalRequired = ing.quantity * quantity;
+            requiredIngredients[ing.inventoryItemId] = (requiredIngredients[ing.inventoryItemId] || 0) + totalRequired;
+          });
+        }
+
         return {
           name: menuItem.name,
           quantity: quantity,
           price: menuItem.price
         };
       });
+
+      // 2. Check if enough stock exists for all ingredients
+      for (const [itemId, requiredQty] of Object.entries(requiredIngredients)) {
+        const inventoryItem = inventoryItems.find(inv => inv.id === itemId);
+        if (!inventoryItem || inventoryItem.quantity < requiredQty) {
+          toast.error(`在庫不足: ${inventoryItem?.name || '不明な食材'} (残り ${inventoryItem?.quantity || 0}${inventoryItem?.unit || ''})`);
+          return;
+        }
+      }
 
       const totalAmount = items.reduce((acc, i) => acc + (i.price * i.quantity), 0);
       
@@ -148,12 +179,28 @@ export function OrderManagement() {
         updatedAt: Timestamp.now()
       };
 
-      await addDoc(collection(db, 'orders'), orderData);
+      // 3. Perform transaction: Add Order + Decrement Inventory
+      await runTransaction(db, async (transaction) => {
+        // Create the order
+        const newOrderRef = doc(collection(db, 'orders'));
+        transaction.set(newOrderRef, orderData);
+
+        // Update each inventory item
+        for (const [itemId, requiredQty] of Object.entries(requiredIngredients)) {
+          const invRef = doc(db, 'inventory', itemId);
+          transaction.update(invRef, {
+            quantity: increment(-requiredQty),
+            updatedAt: Timestamp.now()
+          });
+        }
+      });
+
       setIsAddingOrder(false);
       setNewOrder({ tableNumber: '1', type: 'eat-in', items: [{ menuItemId: '', quantity: 1 }] });
-      toast.success('注文を追加しました');
+      toast.success('注文を追加し、在庫を更新しました');
     } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, 'orders');
+      console.error(error);
+      handleFirestoreError(error, OperationType.CREATE, 'orders/transaction');
     }
   };
 

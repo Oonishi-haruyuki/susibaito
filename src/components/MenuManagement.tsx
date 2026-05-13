@@ -10,7 +10,7 @@ import {
   deleteDoc
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '@/src/lib/firebase';
-import { MenuItem, MenuCategory } from '@/src/types';
+import { MenuItem, MenuCategory, InventoryItem } from '@/src/types';
 import { 
   Plus, 
   Search, 
@@ -50,6 +50,7 @@ const CATEGORY_MAP: Record<MenuCategory, string> = {
 
 export function MenuManagement() {
   const [items, setItems] = useState<MenuItem[]>([]);
+  const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([]);
   const [search, setSearch] = useState('');
   const [isAdding, setIsAdding] = useState(false);
   const [editingItem, setEditingItem] = useState<MenuItem | null>(null);
@@ -58,7 +59,8 @@ export function MenuManagement() {
     price: 0,
     category: 'nigiri',
     description: '',
-    imageUrl: ''
+    imageUrl: '',
+    ingredients: []
   });
 
   useEffect(() => {
@@ -69,7 +71,19 @@ export function MenuManagement() {
     }, (error) => {
       handleFirestoreError(error, OperationType.LIST, 'menu');
     });
-    return () => unsubscribe();
+
+    const invQ = query(collection(db, 'inventory'));
+    const invUnsubscribe = onSnapshot(invQ, (snapshot) => {
+      const invData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as InventoryItem));
+      setInventoryItems(invData);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'inventory');
+    });
+
+    return () => {
+      unsubscribe();
+      invUnsubscribe();
+    };
   }, []);
 
   const handleSaveItem = async () => {
@@ -96,7 +110,7 @@ export function MenuManagement() {
 
       setIsAdding(false);
       setEditingItem(null);
-      setNewItem({ name: '', price: 0, category: 'nigiri', description: '', imageUrl: '' });
+      setNewItem({ name: '', price: 0, category: 'nigiri', description: '', imageUrl: '', ingredients: [] });
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'menu');
     }
@@ -135,7 +149,7 @@ export function MenuManagement() {
           setIsAdding(open);
           if (!open) {
             setEditingItem(null);
-            setNewItem({ name: '', price: 0, category: 'nigiri', description: '', imageUrl: '' });
+            setNewItem({ name: '', price: 0, category: 'nigiri', description: '', imageUrl: '', ingredients: [] });
           }
         }}>
           <DialogTrigger
@@ -198,6 +212,82 @@ export function MenuManagement() {
                   onChange={(e) => setNewItem({...newItem, imageUrl: e.target.value})}
                 />
               </div>
+
+              <div className="space-y-3 pt-2 border-t border-zinc-100">
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">必要食材 (レシピ)</Label>
+                  <Button 
+                    variant="outline" 
+                    size="sm" 
+                    className="h-7 text-xs"
+                    onClick={() => {
+                      const ingredients = newItem.ingredients || [];
+                      setNewItem({
+                        ...newItem,
+                        ingredients: [...ingredients, { inventoryItemId: '', quantity: 0 }]
+                      });
+                    }}
+                  >
+                    食材を追加
+                  </Button>
+                </div>
+                
+                {(newItem.ingredients || []).length === 0 ? (
+                  <p className="text-[10px] text-zinc-400 italic">食材が設定されていません</p>
+                ) : (
+                  <div className="space-y-2">
+                    {(newItem.ingredients || []).map((ing, idx) => (
+                      <div key={idx} className="flex gap-2 items-end">
+                        <div className="flex-1 space-y-1">
+                          <Select 
+                            value={ing.inventoryItemId} 
+                            onValueChange={(val) => {
+                              const updated = [...(newItem.ingredients || [])];
+                              updated[idx].inventoryItemId = val;
+                              setNewItem({...newItem, ingredients: updated});
+                            }}
+                          >
+                            <SelectTrigger className="h-9">
+                              <SelectValue placeholder="食材を選択" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {inventoryItems.map(inv => (
+                                <SelectItem key={inv.id} value={inv.id!}>
+                                  {inv.name} ({inv.unit})
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="w-24 space-y-1">
+                          <Input 
+                            type="number" 
+                            className="h-9"
+                            placeholder="分量"
+                            value={isNaN(ing.quantity) ? "" : ing.quantity}
+                            onChange={(e) => {
+                              const updated = [...(newItem.ingredients || [])];
+                              updated[idx].quantity = parseFloat(e.target.value);
+                              setNewItem({...newItem, ingredients: updated});
+                            }}
+                          />
+                        </div>
+                        <Button 
+                          variant="ghost" 
+                          size="icon" 
+                          className="h-9 w-9 text-zinc-400 hover:text-red-500"
+                          onClick={() => {
+                            const updated = (newItem.ingredients || []).filter((_, i) => i !== idx);
+                            setNewItem({...newItem, ingredients: updated});
+                          }}
+                        >
+                          <Trash2 size={14} />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
             <DialogFooter>
               <Button variant="outline" onClick={() => setIsAdding(false)}>キャンセル</Button>
@@ -228,7 +318,8 @@ export function MenuManagement() {
                       price: item.price,
                       category: item.category,
                       description: item.description || '',
-                      imageUrl: item.imageUrl || ''
+                      imageUrl: item.imageUrl || '',
+                      ingredients: item.ingredients || []
                     });
                     setIsAdding(true);
                   }}

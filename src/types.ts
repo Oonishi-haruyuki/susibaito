@@ -48,4 +48,8 @@ export interface MenuItem {
   category: MenuCategory;
   description?: string;
   imageUrl?: string;
+  ingredients?: {
+    inventoryItemId: string;
+    quantity: number;
+  }[];
 }

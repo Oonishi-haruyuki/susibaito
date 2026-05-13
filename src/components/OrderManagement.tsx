@@ -22,7 +22,8 @@ import {
   ShoppingBag, 
   MoreVertical,
   ChevronRight,
-  TrendingUp
+  TrendingUp,
+  Search
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -52,6 +53,7 @@ import {
   DropdownMenuTrigger 
 } from '@/components/ui/dropdown-menu';
 import { toast } from 'sonner';
+import { Customer } from '@/src/types';
 
 const STATUS_MAP: Record<OrderStatus, { label: string, color: string }> = {
   received: { label: '注文完了', color: 'bg-zinc-100 text-zinc-800' },
@@ -63,6 +65,8 @@ const STATUS_MAP: Record<OrderStatus, { label: string, color: string }> = {
 export function OrderManagement() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [searchTerm, setSearchTerm] = useState('');
   const [isAddingOrder, setIsAddingOrder] = useState(false);
   const [newOrder, setNewOrder] = useState<{
     tableNumber: string;
@@ -89,9 +93,16 @@ export function OrderManagement() {
       setMenuItems(menuData);
     });
 
+    const customerQ = query(collection(db, 'customers'));
+    const customerUnsubscribe = onSnapshot(customerQ, (snapshot) => {
+      const customerData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Customer));
+      setCustomers(customerData);
+    });
+
     return () => {
       unsubscribe();
       menuUnsubscribe();
+      customerUnsubscribe();
     }
   }, []);
 
@@ -158,6 +169,14 @@ export function OrderManagement() {
     updatedItems[index] = { menuItemId, quantity };
     setNewOrder(prev => ({ ...prev, items: updatedItems }));
   };
+
+  const filteredOrders = orders.filter(order => {
+    const tableMatch = order.tableNumber.toString().includes(searchTerm);
+    const customer = customers.find(c => c.id === order.customerId);
+    const customerNameMatch = customer ? customer.name.toLowerCase().includes(searchTerm.toLowerCase()) : false;
+    
+    return tableMatch || customerNameMatch;
+  });
 
   const activeOrders = orders.filter(o => o.status !== 'paid');
   const totalToday = orders
@@ -292,12 +311,29 @@ export function OrderManagement() {
       <div className="grid grid-cols-1 gap-6">
         <Card className="border-none shadow-sm">
           <CardHeader>
-            <CardTitle className="font-serif flex items-center justify-between">
-              直近の注文一覧
-              <div className="flex gap-2">
-                <Badge variant="outline" className="font-sans font-normal border-zinc-200">全て</Badge>
-                <Badge variant="outline" className="font-sans font-normal border-zinc-200 opacity-50">店内のみ</Badge>
-                <Badge variant="outline" className="font-sans font-normal border-zinc-200 opacity-50">持ち帰りのみ</Badge>
+            <CardTitle className="font-serif flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="flex items-center justify-between w-full md:w-auto">
+                <span>直近の注文一覧</span>
+                <div className="md:hidden flex gap-2">
+                  <Badge variant="outline" className="font-sans font-normal border-zinc-200">全て</Badge>
+                </div>
+              </div>
+              
+              <div className="flex flex-col md:flex-row gap-4 items-stretch md:items-center">
+                <div className="relative w-full md:w-72">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={16} />
+                  <Input 
+                    placeholder="卓番号、客名で検索..." 
+                    className="pl-9 bg-zinc-50 border-zinc-200 h-9 text-sm"
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                  />
+                </div>
+                <div className="hidden md:flex gap-2">
+                  <Badge variant="outline" className="font-sans font-normal border-zinc-200">全て</Badge>
+                  <Badge variant="outline" className="font-sans font-normal border-zinc-200 opacity-50">店内のみ</Badge>
+                  <Badge variant="outline" className="font-sans font-normal border-zinc-200 opacity-50">持ち帰りのみ</Badge>
+                </div>
               </div>
             </CardTitle>
             <CardDescription>リアルタイムで同期されています</CardDescription>
@@ -315,14 +351,14 @@ export function OrderManagement() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {orders.length === 0 ? (
+                {filteredOrders.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={6} className="h-32 text-center text-zinc-400">
-                      注文がありません
+                      {searchTerm ? '一致する注文が見つかりません' : '注文がありません'}
                     </TableCell>
                   </TableRow>
                 ) : (
-                  orders.map((order) => (
+                  filteredOrders.map((order) => (
                     <TableRow key={order.id} className="group border-zinc-100">
                       <TableCell>
                         <Badge className={cn("font-medium", STATUS_MAP[order.status].color)}>

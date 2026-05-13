@@ -261,18 +261,18 @@ export function OrderManagement() {
           </CardContent>
         </Card>
         
-        <Dialog open={isAddingOrder} onOpenChange={setIsAddingOrder}>
-          <DialogTrigger
-            render={
-              <Button className="h-full bg-[#E31E24] hover:bg-[#C21A1F] text-white flex flex-col items-center justify-center gap-2 rounded-xl group transition-all">
-                <div className="bg-white/10 p-2 rounded-full group-hover:scale-110 transition-transform">
-                  <Plus size={24} />
-                </div>
-                <span className="font-serif">新規注文を追加</span>
-              </Button>
-            }
-          />
-          <DialogContent className="max-w-2xl sm:max-w-[600px]">
+          <Dialog open={isAddingOrder} onOpenChange={setIsAddingOrder}>
+            <DialogTrigger
+              render={
+                <Button className="h-full bg-[#E31E24] hover:bg-[#C21A1F] text-white flex flex-col items-center justify-center gap-2 rounded-xl group transition-all">
+                  <div className="bg-white/10 p-2 rounded-full group-hover:scale-110 transition-transform">
+                    <Plus size={24} />
+                  </div>
+                  <span className="font-serif">新規注文を追加</span>
+                </Button>
+              }
+            />
+            <DialogContent className="max-w-2xl sm:max-w-[600px]">
             <DialogHeader>
               <DialogTitle className="font-serif">新規注文入力</DialogTitle>
             </DialogHeader>

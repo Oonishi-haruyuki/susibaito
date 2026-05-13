@@ -20,7 +20,7 @@ import { CustomerSimulator } from '@/src/components/CustomerSimulator';
 import { Button } from '@/components/ui/button';
 import { Toaster } from '@/components/ui/sonner';
 import { ChefHat, LogIn } from 'lucide-react';
-import { motion } from 'framer-motion';
+import { motion } from 'motion/react';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);

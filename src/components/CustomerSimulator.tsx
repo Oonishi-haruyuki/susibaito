@@ -17,7 +17,7 @@ import { db, handleFirestoreError, OperationType } from '@/src/lib/firebase';
 import { MenuItem, Order } from '@/src/types';
 import { Button } from '@/components/ui/button';
 import { ChefHat, ShoppingCart, User as UserIcon } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence } from 'motion/react';
 
 // --- 3D Components ---
 

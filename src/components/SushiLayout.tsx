@@ -1,6 +1,6 @@
 import React from 'react';
 import { ChefHat, ClipboardList, Package, Users, Settings, LogOut, PlayCircle } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence } from 'motion/react';
 import { auth } from '@/src/lib/firebase';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -56,8 +56,7 @@ export function SushiLayout({ children, activeTab, setActiveTab, user }: SushiLa
                 )} />
                 <span className="font-medium text-sm">{tab.label}</span>
                 {isActive && (
-                  <motion.div 
-                    layoutId="activeTab"
+                  <div 
                     className="ml-auto w-1.5 h-1.5 bg-white rounded-full"
                   />
                 )}

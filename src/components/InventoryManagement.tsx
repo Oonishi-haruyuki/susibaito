@@ -379,6 +379,44 @@ export function InventoryManagement() {
   );
 
   const lowStockItems = items.filter(item => item.quantity <= item.minThreshold);
+  const uniqueLowStockNames = Array.from(new Set(lowStockItems.map(i => i.name)));
+
+  // Detect duplicate names in the entire inventory
+  const duplicateGroups = items.reduce((acc, item) => {
+    if (!acc[item.name]) acc[item.name] = [];
+    acc[item.name].push(item);
+    return acc;
+  }, {} as Record<string, InventoryItem[]>);
+
+  const duplicateNames = Object.keys(duplicateGroups).filter(name => duplicateGroups[name].length > 1);
+
+  const handleCleanupDuplicates = async () => {
+    if (!confirm(`名前が重複しているアイテムが ${duplicateNames.length} 件あります。数量を合算して1つに統合しますか？`)) return;
+    
+    try {
+      for (const name of duplicateNames) {
+        const group = duplicateGroups[name];
+        // Sort by updatedAt or assume the first one is the "main" one
+        const [mainItem, ...others] = group;
+        const totalQuantity = group.reduce((sum, item) => sum + item.quantity, 0);
+
+        // Update the main item with total quantity
+        await updateDoc(doc(db, 'inventory', mainItem.id!), {
+          quantity: totalQuantity,
+          updatedAt: Timestamp.now()
+        });
+
+        // Delete the others
+        for (const other of others) {
+          await deleteDoc(doc(db, 'inventory', other.id!));
+        }
+      }
+      toast.success('重複データを統合・削除しました');
+    } catch (error) {
+      console.error(error);
+      toast.error('重複データの削除に失敗しました');
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -590,21 +628,55 @@ export function InventoryManagement() {
             </div>
           </div>
 
-          {lowStockItems.length > 0 && (
-            <Card className="border-amber-200 bg-amber-50 shadow-none">
-              <CardContent className="pt-6 flex items-start gap-4">
-                <div className="bg-amber-100 p-2 rounded-full">
-                  <AlertTriangle className="text-amber-600" size={20} />
+          { (lowStockItems.length > 0 || duplicateNames.length > 0) && (
+            <Card className={cn(
+              "border-none shadow-none",
+              duplicateNames.length > 0 ? "bg-red-50" : "bg-amber-50"
+            )}>
+              <CardContent className="pt-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div className="flex items-start gap-4">
+                  <div className={cn(
+                    "p-2 rounded-full",
+                    duplicateNames.length > 0 ? "bg-red-100 text-red-600" : "bg-amber-100 text-amber-600"
+                  )}>
+                    <AlertTriangle size={20} />
+                  </div>
+                  <div>
+                    <h3 className={cn(
+                      "text-sm font-semibold",
+                      duplicateNames.length > 0 ? "text-red-900" : "text-amber-900"
+                    )}>
+                      {duplicateNames.length > 0 ? 'データの重複が発生しています' : '在庫が少なくなっています'}
+                    </h3>
+                    <p className={cn(
+                      "text-xs mt-1",
+                      duplicateNames.length > 0 ? "text-red-700" : "text-amber-700"
+                    )}>
+                      {duplicateNames.length > 0 ? (
+                        <>
+                          以下のアイテムが重複しています: <b>{duplicateNames.join(', ')}</b>。
+                          データ不整合を防ぐため、統合してください。
+                        </>
+                      ) : (
+                        <>
+                          以下の{uniqueLowStockNames.length}点のアイテムが閾値を下回っています: 
+                          <span className="font-medium ml-1">
+                            {uniqueLowStockNames.join(', ')}
+                          </span>
+                        </>
+                      )}
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <h3 className="text-sm font-semibold text-amber-900">在庫が少なくなっています</h3>
-                  <p className="text-xs text-amber-700 mt-1">
-                    以下の{lowStockItems.length}件のアイテムが閾値を下回っています: 
-                    <span className="font-medium ml-1">
-                      {lowStockItems.map(i => i.name).join(', ')}
-                    </span>
-                  </p>
-                </div>
+                {duplicateNames.length > 0 && (
+                  <Button 
+                    onClick={handleCleanupDuplicates}
+                    className="bg-red-600 hover:bg-red-700 text-white gap-2 shrink-0"
+                  >
+                    <Trash2 size={16} />
+                    重複を削除して整理する
+                  </Button>
+                )}
               </CardContent>
             </Card>
           )}
@@ -674,7 +746,7 @@ export function InventoryManagement() {
                           <Button 
                             variant="ghost" 
                             size="icon" 
-                            className="h-8 w-8 text-zinc-400 hover:text-zinc-900"
+                            className="h-8 w-8 text-zinc-400 hover:text-zinc-900 group/edit"
                             onClick={() => {
                               setEditingItem(item);
                               setNewItem({
@@ -688,15 +760,15 @@ export function InventoryManagement() {
                               setIsAddingItem(true);
                             }}
                           >
-                            <Edit2 size={14} />
+                            <Edit2 size={14} className="group-hover/edit:scale-110 transition-transform" />
                           </Button>
                           <Button 
                             variant="ghost" 
                             size="icon" 
-                            className="h-8 w-8 text-zinc-400 hover:text-red-500"
+                            className="h-8 w-8 text-zinc-400 hover:text-red-600 hover:bg-red-50 group/delete"
                             onClick={() => handleDeleteItem(item.id!)}
                           >
-                            <Trash2 size={14} />
+                            <Trash2 size={14} className="group-hover/delete:scale-110 transition-transform" />
                           </Button>
                         </div>
                       </TableCell>

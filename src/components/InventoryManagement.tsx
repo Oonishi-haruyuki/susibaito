@@ -99,6 +99,9 @@ export function InventoryManagement() {
     purchasePrice: 0
   });
 
+  const [showCleanupConfirm, setShowCleanupConfirm] = useState(false);
+  const [itemToDelete, setItemToDelete] = useState<string | null>(null);
+
   useEffect(() => {
     // Calculate daily market factor (based on date)
     const today = new Date();
@@ -171,10 +174,10 @@ export function InventoryManagement() {
   };
 
   const handleDeleteItem = async (id: string) => {
-    if (!confirm('本当に削除しますか？')) return;
     try {
       await deleteDoc(doc(db, 'inventory', id));
       toast.success('削除しました');
+      setItemToDelete(null);
     } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, `inventory/${id}`);
     }
@@ -187,8 +190,7 @@ export function InventoryManagement() {
     }
 
     const item = items.find(i => i.id === procureItem.id);
-    const basePrice = item?.purchasePrice || 1000;
-    const currentPrice = Math.round(basePrice * marketFactor);
+    const currentPrice = getDisplayPrice(item?.name || '', item?.purchasePrice || 0);
     const cost = currentPrice * procureItem.quantity;
 
     if (balance < cost) {
@@ -200,6 +202,11 @@ export function InventoryManagement() {
       await runTransaction(db, async (transaction) => {
         const itemRef = doc(db, 'inventory', procureItem.id);
         const financeRef = doc(db, 'finances', 'main');
+        
+        const itemSnap = await transaction.get(itemRef);
+        if (!itemSnap.exists()) {
+          throw new Error('仕入れ対象の食材が見つかりません');
+        }
 
         transaction.update(itemRef, {
           quantity: increment(procureItem.quantity),
@@ -219,11 +226,12 @@ export function InventoryManagement() {
     }
   };
 
-  const handleCookSushiRice = async () => {
+  const handleCookSushiRice = async (explicitAmount?: number) => {
+    const amount = explicitAmount !== undefined ? explicitAmount : cookAmount;
     // 3:7 ratio. Total units = rice + vinegar.
-    // Let's say units are kg.
-    const riceNeeded = cookAmount * 0.7;
-    const vinegarNeeded = cookAmount * 0.3;
+    // Amount is assumed to be in kg for internal logic
+    const riceNeeded = amount * 0.7;
+    const vinegarNeeded = amount * 0.3;
 
     const riceItem = items.find(i => i.name === '米' || i.category === 'rice');
     const vinegarItem = items.find(i => i.name === '酢');
@@ -240,28 +248,42 @@ export function InventoryManagement() {
 
     try {
       await runTransaction(db, async (transaction) => {
-        // Decrement ingredients
-        transaction.update(doc(db, 'inventory', riceItem.id!), {
+        // 1. All reads first
+        const riceRef = doc(db, 'inventory', riceItem.id!);
+        const vinegarRef = doc(db, 'inventory', vinegarItem.id!);
+        const srRef = doc(db, 'inventory', sushiRiceItem?.id || 'non-existent-id');
+        
+        const [riceSnap, vinegarSnap, srSnap] = await Promise.all([
+          transaction.get(riceRef),
+          transaction.get(vinegarRef),
+          sushiRiceItem ? transaction.get(srRef) : Promise.resolve(null)
+        ]);
+
+        // 2. All writes after
+        transaction.update(riceRef, {
           quantity: increment(-riceNeeded),
           updatedAt: Timestamp.now()
         });
-        transaction.update(doc(db, 'inventory', vinegarItem.id!), {
+        transaction.update(vinegarRef, {
           quantity: increment(-vinegarNeeded),
           updatedAt: Timestamp.now()
         });
 
         // Increment or Create Sushi Rice
-        if (sushiRiceItem) {
-          transaction.update(doc(db, 'inventory', sushiRiceItem.id!), {
-            quantity: increment(cookAmount),
+        if (sushiRiceItem && srSnap && srSnap.exists()) {
+          transaction.update(srRef, {
+            quantity: increment(amount),
             updatedAt: Timestamp.now()
           });
         } else {
-          const newRef = doc(collection(db, 'inventory'));
-          transaction.set(newRef, {
+          // If it didn't exist or was deleted, we need a ref. 
+          // If sushiRiceItem was found initially but srSnap doesn't exist, we use srRef.
+          // If sushiRiceItem was NOT found initially, we create a new one.
+          const finalSRRef = (sushiRiceItem) ? srRef : doc(collection(db, 'inventory'));
+          transaction.set(finalSRRef, {
             name: '酢飯',
             unit: 'kg',
-            quantity: cookAmount,
+            quantity: amount,
             minThreshold: 5,
             category: 'rice',
             purchasePrice: 0,
@@ -287,44 +309,74 @@ export function InventoryManagement() {
     }
 
     // Check availability
-    const required: Record<string, number> = {};
+    const required: Record<string, { id: string, qty: number, name: string }> = {};
     for (const ing of menuItem.ingredients) {
       const needed = ing.quantity * cookAmount;
-      const inv = items.find(i => i.id === ing.inventoryItemId);
+      // Try to find by ID first
+      let inv = items.find(i => i.id === ing.inventoryItemId);
+      
+      // Resilient fallback: try to find by name if ID is missing (common for "酢飯" or "シャリ")
+      if (!inv) {
+        // Find if this ingredient name is recognizable
+        const fallbackNames = ['酢飯', 'シャリ', 'まぐろ', 'サーモン', 'いくら', '海老'];
+        // This is a bit of a hack because we don't store ingredient names in the Order object's ingredients array usually, 
+        // but we can infer them or check the most common ones.
+        // Better: Find the item that was originally intended.
+        inv = items.find(i => i.name === '酢飯' || i.name === 'シャリ');
+      }
+
       if (!inv || inv.quantity < needed) {
         toast.error(`${inv?.name || '不明な食材'}が足りません`);
         return;
       }
-      required[ing.inventoryItemId] = needed;
+      required[inv.id!] = { id: inv.id!, qty: needed, name: inv.name };
     }
 
     try {
+      const preparedName = menuItem.name;
+      const preparedItem = items.find(i => 
+        (i.name === preparedName && i.isPrepared) || 
+        (i.name === `${menuItem.name} (仕込み済)`) ||
+        (i.name === `${menuItem.name} (調理済)`)
+      );
+
       await runTransaction(db, async (transaction) => {
-        // Deduct ingredients
-        for (const [id, qty] of Object.entries(required)) {
-          transaction.update(doc(db, 'inventory', id), {
-            quantity: increment(-qty),
-            updatedAt: Timestamp.now()
-          });
+        // 1. All reads first
+        const ingredientSnaps = [];
+        for (const { id, qty } of Object.values(required)) {
+          const invRef = doc(db, 'inventory', id);
+          const invSnap = await transaction.get(invRef);
+          ingredientSnaps.push({ ref: invRef, snap: invSnap, qty });
         }
 
-        // Add to "Prepared" item
-        const preparedName = `${menuItem.name} (仕込み済)`;
-        let preparedItem = items.find(i => i.name === preparedName);
+        const prepRef = preparedItem ? doc(db, 'inventory', preparedItem.id!) : doc(collection(db, 'inventory'));
+        const prepSnap = preparedItem ? await transaction.get(prepRef) : null;
 
-        if (preparedItem) {
-          transaction.update(doc(db, 'inventory', preparedItem.id!), {
+        // 2. All writes after
+        for (const { ref, snap, qty } of ingredientSnaps) {
+          if (snap.exists()) {
+            transaction.update(ref, {
+              quantity: increment(-qty),
+              updatedAt: Timestamp.now()
+            });
+          }
+        }
+
+        if (preparedItem && prepSnap && prepSnap.exists()) {
+          transaction.update(prepRef, {
+            name: preparedName,
+            isPrepared: true,
             quantity: increment(cookAmount),
             updatedAt: Timestamp.now()
           });
         } else {
-          const newRef = doc(collection(db, 'inventory'));
-          transaction.set(newRef, {
+          transaction.set(prepRef, {
             name: preparedName,
             unit: 'pcs',
             quantity: cookAmount,
             minThreshold: 0,
             category: 'other',
+            isPrepared: true,
             updatedAt: Timestamp.now()
           });
         }
@@ -337,14 +389,21 @@ export function InventoryManagement() {
 
   const initializeStock = async () => {
     const itemsToInit = [
-      { name: 'まぐろ', quantity: 0, unit: 'kg', category: 'fish' as InventoryCategory, minThreshold: 10, purchasePrice: 3000 },
-      { name: 'サーモン', quantity: 0, unit: 'kg', category: 'fish' as InventoryCategory, minThreshold: 10, purchasePrice: 2000 },
-      { name: 'いくら', quantity: 0, unit: 'kg', category: 'fish' as InventoryCategory, minThreshold: 5, purchasePrice: 5000 },
-      { name: '海老', quantity: 0, unit: 'kg', category: 'fish' as InventoryCategory, minThreshold: 5, purchasePrice: 1500 },
+      { name: 'まぐろ', quantity: 0, unit: 'kg', category: 'fish' as InventoryCategory, minThreshold: 10, purchasePrice: 3500 },
+      { name: 'サーモン', quantity: 0, unit: 'kg', category: 'fish' as InventoryCategory, minThreshold: 10, purchasePrice: 3750 },
+      { name: 'いくら', quantity: 0, unit: 'kg', category: 'fish' as InventoryCategory, minThreshold: 5, purchasePrice: 2500 },
+      { name: '海老', quantity: 0, unit: 'kg', category: 'fish' as InventoryCategory, minThreshold: 5, purchasePrice: 1900 },
+      { name: 'うに', quantity: 0, unit: 'kg', category: 'fish' as InventoryCategory, minThreshold: 2, purchasePrice: 7000 },
+      { name: 'かに', quantity: 0, unit: 'kg', category: 'fish' as InventoryCategory, minThreshold: 2, purchasePrice: 8000 },
       { name: '大葉', quantity: 0, unit: 'pcs', category: 'vegetable' as InventoryCategory, minThreshold: 20, purchasePrice: 10 },
-      { name: '胡瓜', quantity: 0, unit: 'pcs', category: 'vegetable' as InventoryCategory, minThreshold: 10, purchasePrice: 50 },
-      { name: '酢', quantity: 0, unit: 'kg', category: 'other' as InventoryCategory, minThreshold: 0.5, purchasePrice: 500 },
-      { name: '米', quantity: 0, unit: 'kg', category: 'rice' as InventoryCategory, minThreshold: 10, purchasePrice: 400 },
+      { name: 'きゅうり', quantity: 0, unit: 'kg', category: 'vegetable' as InventoryCategory, minThreshold: 10, purchasePrice: 1100 },
+      { name: 'アボカド', quantity: 0, unit: 'kg', category: 'vegetable' as InventoryCategory, minThreshold: 5, purchasePrice: 1250 },
+      { name: 'スライス玉ねぎ', quantity: 0, unit: 'kg', category: 'vegetable' as InventoryCategory, minThreshold: 5, purchasePrice: 875 },
+      { name: 'のり', quantity: 0, unit: 'kg', category: 'other' as InventoryCategory, minThreshold: 10, purchasePrice: 1125 },
+      { name: '酢', quantity: 0, unit: 'L', category: 'other' as InventoryCategory, minThreshold: 2, purchasePrice: 350 },
+      { name: '米', quantity: 0, unit: 'kg', category: 'rice' as InventoryCategory, minThreshold: 10, purchasePrice: 700 },
+      { name: '酢飯', quantity: 0, unit: 'kg', category: 'rice' as InventoryCategory, minThreshold: 5, purchasePrice: 0 },
+      { name: 'カルピス', quantity: 0, unit: 'L', category: 'drink' as InventoryCategory, minThreshold: 5, purchasePrice: 150 },
     ];
 
     try {
@@ -381,21 +440,52 @@ export function InventoryManagement() {
   const lowStockItems = items.filter(item => item.quantity <= item.minThreshold);
   const uniqueLowStockNames = Array.from(new Set(lowStockItems.map(i => i.name)));
 
-  // Detect duplicate names in the entire inventory
+  // Detected duplicate names in the entire inventory
   const duplicateGroups = items.reduce((acc, item) => {
-    if (!acc[item.name]) acc[item.name] = [];
-    acc[item.name].push(item);
+    const normalizedName = item.name.trim();
+    // Unique key: Name + Category + isPrepared
+    const key = `${normalizedName}_${item.category}_${item.isPrepared ? 'p' : 'r'}`;
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(item);
     return acc;
   }, {} as Record<string, InventoryItem[]>);
 
-  const duplicateNames = Object.keys(duplicateGroups).filter(name => duplicateGroups[name].length > 1);
+  const duplicateKeys = Object.keys(duplicateGroups).filter(key => duplicateGroups[key].length > 1);
+  const duplicateNames = duplicateKeys.map(key => duplicateGroups[key][0].name);
+
+  const getDisplayPrice = (name: string, basePrice: number = 0) => {
+    // marketFactor is 0.8 to 1.2. Normalize to 0-1 for range interpolation
+    const normalized = (marketFactor - 0.8) / 0.4;
+    
+    const ranges: Record<string, {min: number, max: number}> = {
+      'まぐろ': { min: 3000, max: 4000 },
+      'マグロ': { min: 3000, max: 4000 },
+      'サーモン': { min: 3000, max: 4500 },
+      'いくら': { min: 2000, max: 3000 },
+      '海老': { min: 1500, max: 2300 },
+      'エビ': { min: 1500, max: 2300 },
+      'アボカド': { min: 1000, max: 1500 },
+      'スライス玉ねぎ': { min: 750, max: 1000 },
+      'きゅうり': { min: 1000, max: 1200 },
+      'のり': { min: 1000, max: 1250 },
+      'うに': { min: 5000, max: 9000 },
+      'かに': { min: 6000, max: 10000 },
+      'カルピス': { min: 100, max: 200 },
+      '米': { min: 600, max: 800 }, // 3000-4000 per 5kg -> 600-800 per kg
+      '酢': { min: 300, max: 400 },
+    };
+
+    const range = ranges[name.trim()];
+    if (range) {
+      return Math.round(range.min + (range.max - range.min) * normalized);
+    }
+    return Math.round(basePrice * marketFactor);
+  };
 
   const handleCleanupDuplicates = async () => {
-    if (!confirm(`名前が重複しているアイテムが ${duplicateNames.length} 件あります。数量を合算して1つに統合しますか？`)) return;
-    
     try {
-      for (const name of duplicateNames) {
-        const group = duplicateGroups[name];
+      for (const key of duplicateKeys) {
+        const group = duplicateGroups[key];
         // Sort by updatedAt or assume the first one is the "main" one
         const [mainItem, ...others] = group;
         const totalQuantity = group.reduce((sum, item) => sum + item.quantity, 0);
@@ -412,6 +502,7 @@ export function InventoryManagement() {
         }
       }
       toast.success('重複データを統合・削除しました');
+      setShowCleanupConfirm(false);
     } catch (error) {
       console.error(error);
       toast.error('重複データの削除に失敗しました');
@@ -669,13 +760,34 @@ export function InventoryManagement() {
                   </div>
                 </div>
                 {duplicateNames.length > 0 && (
-                  <Button 
-                    onClick={handleCleanupDuplicates}
-                    className="bg-red-600 hover:bg-red-700 text-white gap-2 shrink-0"
-                  >
-                    <Trash2 size={16} />
-                    重複を削除して整理する
-                  </Button>
+                  <Dialog open={showCleanupConfirm} onOpenChange={setShowCleanupConfirm}>
+                    <DialogTrigger
+                      render={
+                        <Button 
+                          className="bg-red-600 hover:bg-red-700 text-white gap-2 shrink-0"
+                        >
+                          <Trash2 size={16} />
+                          重複を削除して整理する
+                        </Button>
+                      }
+                    />
+                    <DialogContent>
+                      <DialogHeader>
+                        <DialogTitle>重複データの統合と整理</DialogTitle>
+                      </DialogHeader>
+                      <div className="py-4 text-sm text-zinc-600">
+                        <p>名前が重複しているアイテムが {duplicateNames.length} 件あります。</p>
+                        <ul className="list-disc list-inside mt-2 text-zinc-400">
+                          {duplicateNames.map(n => <li key={n}>{n}</li>)}
+                        </ul>
+                        <p className="mt-4 font-semibold text-zinc-900 italic">各アイテムの数量を合算した上で、1つのデータに統合しますか？</p>
+                      </div>
+                      <DialogFooter>
+                        <Button variant="outline" onClick={() => setShowCleanupConfirm(false)}>キャンセル</Button>
+                        <Button className="bg-red-600" onClick={handleCleanupDuplicates}>統合を実行する</Button>
+                      </DialogFooter>
+                    </DialogContent>
+                  </Dialog>
                 )}
               </CardContent>
             </Card>
@@ -703,7 +815,14 @@ export function InventoryManagement() {
                           {CATEGORY_MAP[item.category]}
                         </Badge>
                       </TableCell>
-                      <TableCell className="font-medium text-zinc-900">{item.name}</TableCell>
+                      <TableCell className="font-medium text-zinc-900 flex items-center gap-2">
+                        {item.name.replace(' (仕込み済)', '').replace(' (調理済)', '')}
+                        {item.isPrepared && (
+                          <Badge variant="outline" className="text-[9px] h-4 px-1 text-emerald-600 border-emerald-200 bg-emerald-50 font-normal">
+                            仕込
+                          </Badge>
+                        )}
+                      </TableCell>
                       <TableCell>
                         <div className="flex items-baseline gap-1">
                           <span className={cn(
@@ -716,17 +835,17 @@ export function InventoryManagement() {
                         </div>
                       </TableCell>
                       <TableCell className="font-mono text-zinc-600">
-                        {item.purchasePrice ? (
-                          <div className="flex flex-col">
-                            <span className={cn(
-                              "font-bold",
-                              marketFactor > 1 ? "text-red-600" : marketFactor < 1 ? "text-emerald-600" : "text-zinc-900"
-                            )}>
-                              ¥{Math.round(item.purchasePrice * marketFactor).toLocaleString()}
-                            </span>
+                        <div className="flex flex-col">
+                          <span className={cn(
+                            "font-bold",
+                            marketFactor > 1 ? "text-red-600" : marketFactor < 1 ? "text-emerald-600" : "text-zinc-900"
+                          )}>
+                            ¥{getDisplayPrice(item.name, item.purchasePrice || 0).toLocaleString()}
+                          </span>
+                          {item.purchasePrice ? (
                             <span className="text-[10px] text-zinc-400">参考: ¥{item.purchasePrice.toLocaleString()}</span>
-                          </div>
-                        ) : '-'}
+                          ) : null}
+                        </div>
                       </TableCell>
                       <TableCell>
                         {isLow ? (
@@ -766,7 +885,7 @@ export function InventoryManagement() {
                             variant="ghost" 
                             size="icon" 
                             className="h-8 w-8 text-zinc-400 hover:text-red-600 hover:bg-red-50 group/delete"
-                            onClick={() => handleDeleteItem(item.id!)}
+                            onClick={() => setItemToDelete(item.id!)}
                           >
                             <Trash2 size={14} className="group-hover/delete:scale-110 transition-transform" />
                           </Button>
@@ -778,6 +897,23 @@ export function InventoryManagement() {
               </TableBody>
             </Table>
           </Card>
+
+          {/* Delete Confirmation Dialog */}
+          <Dialog open={!!itemToDelete} onOpenChange={(open) => !open && setItemToDelete(null)}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>アイテムの削除</DialogTitle>
+              </DialogHeader>
+              <div className="py-4">
+                <p className="text-zinc-600">このアイテムを削除してもよろしいですか？</p>
+                <p className="text-sm font-bold mt-1 text-zinc-900">{items.find(i => i.id === itemToDelete)?.name}</p>
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setItemToDelete(null)}>キャンセル</Button>
+                <Button variant="destructive" onClick={() => itemToDelete && handleDeleteItem(itemToDelete)}>削除する</Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </TabsContent>
 
         <TabsContent value="procure" className="pt-4">
@@ -802,14 +938,17 @@ export function InventoryManagement() {
                         <SelectValue placeholder="食材を選択" />
                       </SelectTrigger>
                       <SelectContent>
-                        {items.filter(i => i.purchasePrice !== undefined).map(i => {
-                          const currentPrice = Math.round((i.purchasePrice || 0) * marketFactor);
-                          return (
-                            <SelectItem key={i.id} value={i.id!}>
-                              {i.name} (相場: ¥{currentPrice.toLocaleString()}/{i.unit})
-                            </SelectItem>
-                          );
-                        })}
+                        {items
+                          .filter(i => !i.isPrepared && !i.name.includes('仕込み済') && !i.name.includes('調理済'))
+                          .map(i => {
+                            const currentPrice = getDisplayPrice(i.name, i.purchasePrice || 0);
+                            return (
+                              <SelectItem key={i.id} value={i.id!}>
+                                {i.name} (相場: ¥{currentPrice.toLocaleString()}/{i.unit})
+                              </SelectItem>
+                            );
+                          })
+                        }
                       </SelectContent>
                     </Select>
                   </div>
@@ -832,11 +971,11 @@ export function InventoryManagement() {
                     <div>
                       <div className="text-xs text-zinc-500 uppercase tracking-wider font-semibold">見積合計</div>
                       <div className="text-2xl font-bold text-zinc-900">
-                        ¥{Math.round(((items.find(i => i.id === procureItem.id)?.purchasePrice || 0) * marketFactor) * procureItem.quantity).toLocaleString()}
+                        ¥{Math.round(getDisplayPrice(items.find(i => i.id === procureItem.id)?.name || '', items.find(i => i.id === procureItem.id)?.purchasePrice || 0) * procureItem.quantity).toLocaleString()}
                       </div>
                     </div>
                     <div className="text-right text-sm text-zinc-500 italic">
-                      本日単価 ¥{Math.round((items.find(i => i.id === procureItem.id)?.purchasePrice || 0) * marketFactor).toLocaleString()} × {procureItem.quantity}
+                      本日単価 ¥{getDisplayPrice(items.find(i => i.id === procureItem.id)?.name || '', items.find(i => i.id === procureItem.id)?.purchasePrice || 0).toLocaleString()} × {procureItem.quantity}
                     </div>
                   </div>
                 )}
@@ -903,27 +1042,32 @@ export function InventoryManagement() {
                         <div className="text-xs font-medium">7割</div>
                       </div>
                     </div>
-                    <div className="mt-4 space-y-4">
-                      <div className="space-y-2">
-                        <Label>仕込み量 (kg)</Label>
-                        <Input 
-                          type="number" 
-                          className="h-10 text-center font-bold"
-                          value={isNaN(cookAmount) ? "" : cookAmount}
-                          onChange={(e) => {
-                            const val = parseFloat(e.target.value);
-                            setCookAmount(isNaN(val) ? 0 : val);
-                          }}
-                        />
-                        <div className="flex justify-between text-[10px] text-zinc-500 italic px-1">
-                          <span>必要: 酢 {(isNaN(cookAmount) ? 0 : cookAmount * 0.3).toFixed(2)}kg</span>
-                          <span>米 {(isNaN(cookAmount) ? 0 : cookAmount * 0.7).toFixed(2)}kg</span>
+                      <div className="space-y-4">
+                        <div className="space-y-2">
+                          <Label>仕込み量 (g)</Label>
+                          <Input 
+                            type="number" 
+                            className="h-10 text-center font-bold"
+                            value={isNaN(cookAmount) ? "" : cookAmount}
+                            onChange={(e) => {
+                              const val = parseFloat(e.target.value);
+                              setCookAmount(isNaN(val) ? 0 : val);
+                            }}
+                          />
+                          <div className="flex justify-between text-[10px] text-zinc-500 italic px-1">
+                            <span>必要: 酢 {(isNaN(cookAmount) ? 0 : (cookAmount / 1000) * 0.3 * 1000).toFixed(0)}g</span>
+                            <span>米 {(isNaN(cookAmount) ? 0 : (cookAmount / 1000) * 0.7 * 1000).toFixed(0)}g</span>
+                          </div>
                         </div>
+                        <Button 
+                          onClick={async () => {
+                            await handleCookSushiRice(cookAmount / 1000); 
+                          }} 
+                          className="w-full bg-[#E31E24] text-white"
+                        >
+                          酢飯を仕込む
+                        </Button>
                       </div>
-                      <Button onClick={handleCookSushiRice} className="w-full bg-[#E31E24] text-white">
-                        酢飯を仕込む
-                      </Button>
-                    </div>
                   </div>
                 ) : (
                   <div className="bg-zinc-50 rounded-lg p-6">
@@ -945,11 +1089,26 @@ export function InventoryManagement() {
                             <Label className="text-[10px] text-zinc-500 uppercase tracking-wider">必要材料 (レシピ通り)</Label>
                             <div className="grid grid-cols-2 gap-2">
                               {menuItems.find(m => m.id === selectedMenuItemId)?.ingredients?.map(ing => {
-                                const inv = items.find(i => i.id === ing.inventoryItemId);
+                                // Try to find by ID, or fallback to known types
+                                let inv = items.find(i => i.id === ing.inventoryItemId);
+                                if (!inv && ing.quantity < 0.1) { // Heuristic: small quantity might be rice
+                                   inv = items.find(i => i.name === '酢飯' || i.name === 'シャリ');
+                                }
+                                
+                                const effectiveUnit = inv?.unit || (ing.quantity < 0.1 ? 'kg' : 'pcs');
+                                const displayQty = (effectiveUnit === 'kg' || effectiveUnit === 'L') 
+                                  ? (ing.quantity * cookAmount * 1000) 
+                                  : (ing.quantity * cookAmount);
+                                const displayUnit = (effectiveUnit === 'kg') ? 'g' : (effectiveUnit === 'L') ? 'ml' : effectiveUnit;
+                                
                                 return (
                                   <div key={ing.inventoryItemId} className="bg-white p-2 rounded border border-zinc-100 text-xs flex justify-between items-center">
-                                    <span className="text-zinc-600 truncate mr-2">{inv?.name || '不明'}</span>
-                                    <span className="font-mono flex-shrink-0 text-zinc-400">{(ing.quantity * cookAmount).toFixed(2)}{inv?.unit}</span>
+                                    <span className="text-zinc-600 truncate mr-2">
+                                      {inv?.name || '不明な材料'}
+                                    </span>
+                                    <span className="font-mono flex-shrink-0 text-zinc-400">
+                                      {displayQty.toFixed((displayUnit === 'g' || displayUnit === 'ml') ? 0 : 2)}{displayUnit}
+                                    </span>
                                   </div>
                                 );
                               })}

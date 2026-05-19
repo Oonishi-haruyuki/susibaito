@@ -30,6 +30,7 @@ export interface InventoryItem {
   minThreshold: number;
   category: InventoryCategory;
   purchasePrice?: number;
+  isPrepared?: boolean;
   updatedAt: any;
 }
 

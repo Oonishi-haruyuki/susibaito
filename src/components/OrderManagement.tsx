@@ -165,13 +165,23 @@ export function OrderManagement() {
       await runTransaction(db, async (transaction) => {
         const financeRef = doc(db, 'finances', 'main');
         
-        tableOrders.forEach(order => {
+        // 1. All reads first
+        const orderSnapshots = [];
+        for (const order of tableOrders) {
           const orderRef = doc(db, 'orders', order.id!);
-          transaction.update(orderRef, {
-            status: 'paid',
-            updatedAt: Timestamp.now()
-          });
-        });
+          const orderSnap = await transaction.get(orderRef);
+          orderSnapshots.push({ ref: orderRef, snap: orderSnap });
+        }
+
+        // 2. All writes after
+        for (const { ref, snap } of orderSnapshots) {
+          if (snap.exists()) {
+            transaction.update(ref, {
+              status: 'paid',
+              updatedAt: Timestamp.now()
+            });
+          }
+        }
 
         transaction.update(financeRef, {
           balance: increment(totalAmount),
@@ -237,17 +247,27 @@ export function OrderManagement() {
 
       // 3. Perform transaction: Add Order + Decrement Inventory
       await runTransaction(db, async (transaction) => {
-        // Create the order
+        // A. All reads first
+        const inventorySnapshots = [];
+        for (const [itemId, requiredQty] of Object.entries(requiredIngredients)) {
+          const invRef = doc(db, 'inventory', itemId);
+          const invSnap = await transaction.get(invRef);
+          inventorySnapshots.push({ ref: invRef, snap: invSnap, requiredQty });
+        }
+
+        // B. All writes after
         const newOrderRef = doc(collection(db, 'orders'));
         transaction.set(newOrderRef, orderData);
 
-        // Update each inventory item
-        for (const [itemId, requiredQty] of Object.entries(requiredIngredients)) {
-          const invRef = doc(db, 'inventory', itemId);
-          transaction.update(invRef, {
-            quantity: increment(-requiredQty),
-            updatedAt: Timestamp.now()
-          });
+        for (const { ref, snap, requiredQty } of inventorySnapshots) {
+          if (snap.exists()) {
+            transaction.update(ref, {
+              quantity: increment(-requiredQty),
+              updatedAt: Timestamp.now()
+            });
+          } else {
+            console.warn(`Inventory item ${ref.id} not found. Skipping sync for this ingredient.`);
+          }
         }
       });
 

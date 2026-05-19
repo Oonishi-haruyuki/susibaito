@@ -153,26 +153,59 @@ export function MenuManagement() {
             className="h-11 text-zinc-600 border-zinc-200"
             onClick={async () => {
               const maguro = inventoryItems.find(i => i.name === 'まぐろ');
+              const salmon = inventoryItems.find(i => i.name === 'サーモン');
               const shari = inventoryItems.find(i => i.name === '酢飯' || i.name === 'シャリ');
+              const calpis = inventoryItems.find(i => i.name === 'カルピス');
               
-              if (!maguro || !shari) {
-                toast.error('「まぐろ」と「酢飯」が在庫に必要です。「在庫管理 > 基本品目を準備」を実行してください。');
+              if (!shari) {
+                toast.error('「酢飯」が在庫に必要です。「在庫管理 > 基本品目を準備」を実行してください。');
                 return;
               }
 
               try {
-                await addDoc(collection(db, 'menu'), {
-                  name: 'まぐろ寿司',
-                  price: 300,
-                  category: 'nigiri',
-                  description: '鮮度抜群のまぐろ握り',
-                  imageUrl: '',
-                  ingredients: [
-                    { inventoryItemId: maguro.id, quantity: 0.02 }, // 20g
-                    { inventoryItemId: shari.id, quantity: 0.02 }   // 20g
-                  ]
-                });
-                toast.success('「まぐろ寿司」のレシピを登録しました');
+                const samples = [
+                  {
+                    name: 'まぐろ寿司',
+                    price: 300,
+                    category: 'nigiri',
+                    description: '鮮度抜群のまぐろ握り',
+                    ingredients: maguro ? [
+                      { inventoryItemId: maguro.id, quantity: 0.02 }, // 20g
+                      { inventoryItemId: shari.id, quantity: 0.02 }   // 20g
+                    ] : []
+                  },
+                  {
+                    name: 'サーモン寿司',
+                    price: 280,
+                    category: 'nigiri',
+                    description: 'とろける脂のサーモン',
+                    ingredients: salmon ? [
+                      { inventoryItemId: salmon.id, quantity: 0.02 }, // 20g
+                      { inventoryItemId: shari.id, quantity: 0.02 }   // 20g
+                    ] : []
+                  },
+                  {
+                    name: 'カルピス',
+                    price: 250,
+                    category: 'drink',
+                    description: '爽やかな甘さの乳酸菌飲料',
+                    ingredients: calpis ? [
+                      { inventoryItemId: calpis.id, quantity: 0.5 } // 500ml (0.5L)
+                    ] : []
+                  }
+                ];
+
+                for (const sample of samples) {
+                  // Check if already exists to avoid duplicates
+                  if (!items.find(i => i.name === sample.name)) {
+                    await addDoc(collection(db, 'menu'), {
+                      ...sample,
+                      imageUrl: '',
+                    });
+                  }
+                }
+                
+                toast.success('サンプルメニュー（まぐろ、サーモン、カルピス）のレシピを登録しました');
               } catch (error) {
                 handleFirestoreError(error, OperationType.WRITE, 'menu/sample');
               }
